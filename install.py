@@ -5,11 +5,10 @@ Copies CLAUDE.md and the agents, merges settings.json into your existing one,
 and creates ~/.claude/personal.md from the example once. Anything it replaces
 is backed up to ~/.claude/backups/claude-code-setup-<time>/ first.
 
-  python install.py            # install or update
-  python install.py --link     # symlink instead of copy, so `git pull` updates you
+  python install.py            # install, or update after `git pull`
   python install.py --dry-run  # show what would change
 """
-import argparse, datetime, filecmp, json, os, shutil, sys
+import argparse, datetime, filecmp, json, os, shutil
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent / 'claude'
@@ -29,8 +28,8 @@ def merge(base, extra):
 
 
 class Installer:
-    def __init__(self, link, dry):
-        self.link, self.dry, self.saved = link, dry, False
+    def __init__(self, dry):
+        self.dry, self.saved = dry, False
         self.backup = HOME / 'backups' / ('claude-code-setup-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
 
     def save(self, dst):
@@ -46,21 +45,12 @@ class Installer:
             dst.unlink()
 
     def place(self, src, dst):
-        if self.link and dst.is_symlink() and dst.resolve() == src.resolve():
-            return
-        if not self.link and dst.is_file() and not dst.is_symlink() and filecmp.cmp(src, dst, shallow=False):
+        if dst.is_file() and not dst.is_symlink() and filecmp.cmp(src, dst, shallow=False):
             return
         self.save(dst)
-        print(f'  {"link" if self.link else "copy"}    {dst.relative_to(HOME)}')
-        if self.dry:
-            return
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if self.link:
-            try:
-                dst.symlink_to(src)
-            except OSError as e:
-                sys.exit(f'cannot symlink {dst}: {e}\nOn Windows, enable Developer Mode or run elevated, or drop --link.')
-        else:
+        print(f'  copy    {dst.relative_to(HOME)}')
+        if not self.dry:
+            dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
     def settings(self):
@@ -92,7 +82,5 @@ class Installer:
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--link', action='store_true', help='symlink files instead of copying')
     ap.add_argument('--dry-run', action='store_true', help='print changes without making them')
-    a = ap.parse_args()
-    Installer(a.link, a.dry_run).run()
+    Installer(ap.parse_args().dry_run).run()
