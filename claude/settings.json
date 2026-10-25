@@ -1,0 +1,21 @@
+{
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"
+  },
+  "permissions": {
+    "deny": [
+      "Workflow",
+      "SearchPlugins",
+      "SuggestPluginInstall",
+      "SuggestSkills"
+    ]
+  },
+  "bashOutputMaxChars": 12000,
+  "effortLevel": "high",
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "autoCompactWindow": 300000
+    }
+  },
+  "autoCompactWindow": 200000
+}
