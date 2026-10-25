@@ -1,34 +1,30 @@
 # Working rules
-
-Optimize for momentum and for my Claude usage budget.
+Optimize for momentum and my usage budget.
 
 ## Autonomy
-- Work autonomously with standing approval for routine dev actions: commit, push, tag, delete stale branches/worktrees/artifacts, install or remove dev tools, kill dev processes, change dev config. Don't ask; pick the best option and note it in the summary.
-- Commit straight to the current branch in small focused commits and push once verified. No feature branches or PRs unless I ask.
-- Never commit secrets.
+- Standing approval for routine dev actions (commit, push, tag, clean up stale branches/worktrees/artifacts, dev tools, processes and config): don't ask, note it in the summary.
+- Small focused commits straight to the current branch; push once verified. No branches or PRs unless asked. Never commit secrets.
 
 ## Delegation
-Do quick things inline: up to ~10 tool calls, or anything that needs this conversation's context. Delegate the rest to the cheapest agent whose description fits:
-- Searches needing more than ~3 reads go to `scout`, never Explore.
-- Long builds, test runs and integration chores (push, CI wait, tag) go to `runner` with exact commands, branch and SHA.
-- Design goes to `designer` or `architect`, never `implementer`. Root causes the first fix didn't find, and anything an implementer failed at twice, go to `architect`.
-- `reviewer` checks implementer and designer diffs over ~50 lines, or touching concurrency, security or release code, before pushing; review smaller diffs inline.
-- One concern per agent: ~100 turns, a diff under ~500 lines; split big work into sequenced briefs.
-- Fixes, review findings included, go back to the same agent via SendMessage.
-- Parallel agents only on disjoint files.
+Inline: up to ~10 tool calls, or anything needing this conversation's context. Otherwise the cheapest fitting agent:
+- `scout` for searches over ~3 reads, never Explore.
+- `runner` for long builds/tests and push/CI/tag chores, with exact commands, branch and SHA.
+- `designer` or `architect` for design, never `implementer`; `architect` also for root causes the first fix missed and anything an implementer failed twice.
+- `reviewer` before push for agent diffs over ~50 lines or touching concurrency, security or release code; review smaller ones inline.
+- One concern per agent (~100 turns, diff under ~500 lines). Fixes go back to the same agent via SendMessage. Parallel agents only on disjoint files.
 
 ## Context
-- Filter command output to errors/tail; send long logs to a file and grep it.
+- Filter output to errors/tail; send long logs to a file and grep it.
 - Wait on long builds, tests and CI (`gh run watch <id> --exit-status`) in the background.
-- A new unrelated topic goes to a fresh session (`start_session` where available) unless it's quick.
+- New unrelated topic: a fresh session (`start_session` if available) unless quick.
 
 ## CI
-Keep it minimal: one workflow on push to main plus manual dispatch, one job (lint, tests, build) on the cheapest runner the project allows. No scheduled runs, PR triggers or extra scans unless I ask.
+One workflow (push to main + manual), one job (lint, tests, build), cheapest runner. No schedules, PR triggers or scans unless asked.
 
 ## Done means verified
-Run the tests/build/lint or the app. Fix failures instead of reporting them. For user-facing changes, look at the result. State plainly what you couldn't verify.
+Run the tests/build/lint or the app; look at user-facing results. Fix failures instead of reporting them. Say what you couldn't verify.
 
 ## Output
-Concise, result first. End with: what changed, what was verified, anything I need to know.
+Result first, concise. End with what changed, what was verified, what I need to know.
 
 @~/.claude/personal.md
