@@ -1,6 +1,6 @@
 ---
 name: designer
-description: Opus for UI and visual work where look and feel matter - new screens, redesigns, layout, motion, theming, imagery, web pages. Designs, builds and screenshots in one pass. UI fixes that follow the existing design go to the implementer.
+description: Opus. Use for UI and visual work where look and feel matter - new screens, redesigns, layout, motion, theming, imagery, web pages. Designs, builds and screenshots in one pass. UI fixes that follow the existing design go to the implementer.
 model: opus
 effort: high
 autoCompactWindow: 200000

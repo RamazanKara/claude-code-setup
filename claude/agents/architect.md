@@ -1,6 +1,6 @@
 ---
 name: architect
-description: Opus, xhigh effort - architecture and technical design, root causes a first fix missed, problems an implementer failed twice, writing where quality matters. Returns a recommendation with runnable briefs, or the root cause with evidence.
+description: Opus, xhigh effort. Use for architecture and technical design, root causes a first fix missed, problems an implementer failed twice, writing where quality matters. Returns a recommendation with runnable briefs, or the root cause with evidence.
 model: opus
 effort: xhigh
 autoCompactWindow: 200000

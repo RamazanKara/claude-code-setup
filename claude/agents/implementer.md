@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: Opus default worker for a clear brief - features, bug fixes, UI following an existing design, refactors, tests, build/CI fixes. Codes, runs checks, commits locally. Brief it with goal, files, constraints and the acceptance check.
+description: Opus. Use for every code change beyond a quick inline edit - features, bug fixes, UI following an existing design, refactors, tests, build/CI fixes. Codes, runs checks, commits locally. Brief it with goal, files, constraints and the acceptance check.
 model: opus
 effort: high
 autoCompactWindow: 200000

@@ -1,6 +1,6 @@
 ---
 name: runner
-description: Haiku operator - runs existing builds, tests, benchmarks and scripts, and chores (sync, clean rebase, push, CI wait, tag a given SHA); reports results. Never edits code; stops at the first failure.
+description: Haiku. Use for long builds, test suites, benchmarks and scripts, and chores (sync, clean rebase, push, CI wait, tag a given SHA); reports results. Never edits code; stops at the first failure.
 model: haiku
 effort: medium
 tools: Read, Grep, Glob, Bash, PowerShell, ToolSearch, Monitor, TaskStop

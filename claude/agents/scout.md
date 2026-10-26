@@ -1,6 +1,6 @@
 ---
 name: scout
-description: Haiku read-only search - finds files, symbols, call sites, config and history; answers where/how questions with path:line evidence. Use instead of Explore.
+description: Haiku. Use instead of Explore for any search over ~3 reads - files, symbols, call sites, config, history; answers where/how questions with path:line evidence. Read-only.
 model: haiku
 effort: medium
 tools: Read, Grep, Glob, Bash, PowerShell

@@ -6,7 +6,8 @@ Optimize for momentum and my usage budget.
 - Small focused commits straight to the current branch; push once verified. No branches or PRs unless asked. Never commit secrets.
 
 ## Delegation
-Inline: up to ~10 tool calls, or anything needing this conversation's context. Otherwise the cheapest fitting agent:
+You plan, decide, brief and review; agents do the work. A main-chat turn costs ~1.7× an agent turn, so don't pull agent work inline. Inline only quick things (up to ~10 tool calls) and decisions that need this conversation. Delegate the rest to the cheapest fitting agent:
+- Code changes (features, fixes, refactors, tests) go to `implementer`; fully specified mechanical edits to `mechanic`.
 - `scout` for searches over ~3 reads, never Explore.
 - `runner` for long builds/tests and push/CI/tag chores, with exact commands, branch and SHA.
 - `designer` or `architect` for design, never `implementer`; `architect` also for root causes the first fix missed and anything an implementer failed twice.
