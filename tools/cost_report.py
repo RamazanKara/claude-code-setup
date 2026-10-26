@@ -3,7 +3,9 @@
 
 Splits cost by who spent it (main chat vs each agent type), by model, and by
 token kind (cache reads, cache writes, output, uncached input), so you can see
-which rule in CLAUDE.md would save the most.
+which rule in CLAUDE.md would save the most. A handoff section shows what
+delegating costs: main-chat vs agent turn price, main-chat turns spent reacting
+to agent reports, and how much of each agent's spend comes before its first edit.
 
   python tools/cost_report.py            # last 7 days
   python tools/cost_report.py --days 30
@@ -40,19 +42,49 @@ def cost(model, u):
     }
 
 
-def usage(path):
-    """Yield (model, usage) once per API message; transcripts repeat a message per content block."""
-    seen = {}
+def user_text(e):
+    """Text the user (or the harness) typed; None for tool results."""
+    c = (e.get('message') or {}).get('content')
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list) and not any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in c):
+        return ' '.join(b.get('text', '') for b in c if isinstance(b, dict))
+    return None
+
+
+def usage(path, since):
+    """Return (model, usage, trigger, before_first_edit) once per API message after `since`, in order.
+
+    Transcripts repeat a message per content block. `trigger` is what started the
+    turn: 'user', 'agent report' (a finished agent's notification) or 'compaction'.
+    """
+    seen, trigger, edited = {}, 'user', False
     with open(path, encoding='utf-8', errors='ignore') as f:
         for line in f:
             try:
                 e = json.loads(line)
             except ValueError:
                 continue
+            if e.get('type') == 'user':
+                t = user_text(e)
+                if t and t.strip():
+                    trigger = ('agent report' if '<task-notification' in t[:2000]
+                               else 'compaction' if t.lstrip().startswith('This session is being continued') else 'user')
+                continue
             m = e.get('message') if e.get('type') == 'assistant' else None
-            if isinstance(m, dict) and m.get('id') and m.get('usage'):
-                seen[m['id']] = (str(m.get('model', '')), m['usage'])
-    return seen.values()
+            if not (isinstance(m, dict) and m.get('id')):
+                continue
+            ts = e.get('timestamp')
+            if ts and datetime.datetime.fromisoformat(ts.replace('Z', '+00:00')).timestamp() < since:
+                continue
+            if m['id'] not in seen:
+                seen[m['id']] = [str(m.get('model', '')), None, trigger, not edited]
+            if m.get('usage'):
+                seen[m['id']][1] = m['usage']
+            if any(isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('name') in ('Edit', 'Write', 'NotebookEdit')
+                   for b in m.get('content') or []):
+                edited = True
+    return [tuple(v) for v in seen.values() if v[1]]
 
 
 def main():
@@ -62,16 +94,22 @@ def main():
     a = ap.parse_args()
     since = (datetime.datetime.now() - datetime.timedelta(days=a.days)).timestamp()
 
-    by_who = collections.defaultdict(lambda: {'runs': 0, 'turns': 0, 'cost': 0.0, **{k: 0.0 for k in KINDS}})
+    by_who = collections.defaultdict(lambda: {'runs': 0, 'turns': 0, 'cost': 0.0, **{k: 0.0 for k in KINDS},
+                                              'edit runs': 0, 'edit runs cost': 0.0, 'before first edit': 0.0,
+                                              'agent report': 0.0})
     by_model = collections.Counter()
     unpriced = collections.Counter()
 
     def add(who, path):
         if os.path.getmtime(path) < since:
             return
+        turns = usage(path, since)
+        if not turns:
+            return
         g = by_who[who]
         g['runs'] += 1
-        for model, u in usage(path):
+        run, pre = 0.0, 0.0
+        for model, u, trigger, before_edit in turns:
             c = cost(model, u)
             if c is None:
                 if not model.startswith('<'):  # '<synthetic>' marks local, unbilled messages
@@ -82,6 +120,14 @@ def main():
                 g[k] += v
                 g['cost'] += v
                 by_model[next(k for k in PRICES if k in model)] += v
+            t = sum(c.values())
+            run += t
+            pre += t if before_edit else 0
+            g['agent report'] += t if trigger == 'agent report' else 0
+        if not turns[-1][3]:  # this run edited something
+            g['edit runs'] += 1
+            g['edit runs cost'] += run
+            g['before first edit'] += pre
 
     for jl in glob.glob(os.path.join(a.root, '*', '*.jsonl')):
         add('main chat', jl)
@@ -105,6 +151,18 @@ def main():
         print(f'{who:18}{g["runs"]:6}{g["turns"]:8}{g["cost"]:10.2f}{100 * g["cost"] / total:5.0f}{g["cost"] / g["turns"]:8.3f}   '
               + '  '.join(f'{100 * g[k] / g["cost"]:10.0f}%' for k in KINDS))
     print('\nBy model: ' + ', '.join(f'{m} ${v:,.2f} ({100 * v / total:.0f}%)' for m, v in by_model.most_common()))
+
+    # Handoffs: what delegating costs beyond the work itself (CLAUDE.md "Delegation").
+    main = by_who.get('main chat')
+    agents = sorted(((w, g) for w, g in by_who.items() if w != 'main chat' and g['turns']), key=lambda x: -x[1]['cost'])
+    if main and main['turns'] and agents:
+        top, tg = agents[0]
+        an = 'an' if top[0] in 'aeiou' else 'a'
+        print(f'\nHandoffs:\n  A main-chat turn costs {main["cost"] / main["turns"] / (tg["cost"] / tg["turns"]):.1f}x {an} {top} turn.')
+        print(f'  Main-chat turns reacting to agent reports: {100 * main["agent report"] / main["cost"]:.0f}% of main-chat spend.')
+        for who, g in agents:
+            if g['edit runs cost'] >= 1:
+                print(f'  {who}: {100 * g["before first edit"] / g["edit runs cost"]:.0f}% of its spend comes before its first edit.')
     if unpriced:
         print('Unpriced models (add to PRICES): ' + ', '.join(f'{m} ({n} turns)' for m, n in unpriced.most_common()))
 
