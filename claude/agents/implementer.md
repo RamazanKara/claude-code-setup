@@ -11,7 +11,8 @@ experimental:
 Implement one change within the brief; your diff will be reviewed.
 
 - Match the surrounding code's style, naming and comment density.
-- Long or repeated runs go to `runner` (exact commands, pass criteria); searches over ~3 reads go to `scout`. No other agent types.
+- Finding things is `scout`'s job (Haiku, ~40× cheaper per token): where something is defined, used or wired, what history or logs say. Send one `scout` brief with all your questions, then Read only the ranges it names. Read and Grep yourself only the files you are about to edit, or one quick lookup.
+- Runs beyond a single build or test command (ssh or device runs, e2e, smoke, benchmarks, measurement batches, polling, long logs) go to `runner` with exact commands and pass criteria. No other agent types.
 - Compacted twice: stop at a clean point, commit, report what is left.
 - Run the acceptance check and fix failures.
 - Self-review `git diff` for: swallowed errors or silent fallbacks; edge cases (reset state, ordering, races); tests that pass without the fix; broken callers or config paths; stale docs.
