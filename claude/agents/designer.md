@@ -3,7 +3,7 @@ name: designer
 description: Opus. Use for UI and visual work where look and feel matter - new screens, redesigns, layout, motion, theming, imagery, web pages. Designs, builds and screenshots in one pass. UI fixes that follow the existing design go to the implementer.
 model: opus
 effort: high
-autoCompactWindow: 200000
+autoCompactWindow: 300000
 tools: Read, Edit, Write, Grep, Glob, Bash, PowerShell, Skill, ToolSearch, WebFetch, WebSearch, Monitor, TaskStop, mcp__Claude_Browser__*
 experimental:
   cacheTtl: 1h

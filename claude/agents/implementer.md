@@ -3,7 +3,7 @@ name: implementer
 description: Opus. Use for code changes you hand off - features, bug fixes, design-then-build, UI following an existing design, refactors, tests, build/CI fixes. Designs, codes, runs checks, commits locally. Brief it with goal, files, what you already found, constraints and the acceptance check.
 model: opus
 effort: high
-autoCompactWindow: 200000
+autoCompactWindow: 300000
 tools: Read, Edit, Write, Grep, Glob, Bash, PowerShell, ToolSearch, WebFetch, WebSearch, Monitor, TaskStop, Agent(runner, scout)
 experimental:
   cacheTtl: 1h

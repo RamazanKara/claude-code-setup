@@ -3,7 +3,7 @@ name: architect
 description: Opus, xhigh effort. Use for decisions with no build in the same task (architecture choices, plans spanning several tasks, writing where quality matters), root causes a first fix missed, and problems an implementer failed twice. Design that gets built right away goes to one implementer instead. Returns a recommendation with runnable briefs, or the root cause with evidence.
 model: opus
 effort: xhigh
-autoCompactWindow: 200000
+autoCompactWindow: 300000
 tools: Read, Edit, Write, Grep, Glob, Bash, PowerShell, ToolSearch, WebFetch, WebSearch, Monitor, TaskStop
 experimental:
   cacheTtl: 5m

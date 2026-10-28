@@ -4,7 +4,7 @@ description: Opus. Use before pushing an agent's diff over ~50 lines or touching
 model: opus
 effort: xhigh
 tools: Read, Grep, Glob, Bash, PowerShell
-autoCompactWindow: 150000
+autoCompactWindow: 250000
 experimental:
   cacheTtl: 5m
 ---
