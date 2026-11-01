@@ -17,6 +17,8 @@ import argparse, collections, datetime, glob, json, os
 
 # model substring: (input, output, cache read, cache write 1h, cache write 5m)
 PRICES = {
+    'fable-5-1': (10, 50, .25, 20, 12.5),
+    'fable': (10, 50, 1, 20, 12.5),  # Fable 5: cache read at the usual 0.1x input
     'opus': (4, 20, .20, 8, 5),
     'sonnet': (2, 10, .20, 4, 2.5),
     'haiku': (.10, .50, .01, .20, .125),
