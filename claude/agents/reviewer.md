@@ -2,7 +2,7 @@
 name: reviewer
 description: Opus. Use before pushing an agent's diff over ~50 lines or touching concurrency, security or release code. Give it the commit range and intent. Reports bugs, regressions and missed requirements; doesn't edit.
 model: opus
-effort: xhigh
+effort: high
 tools: Read, Grep, Glob, Bash, PowerShell
 autoCompactWindow: 250000
 experimental:

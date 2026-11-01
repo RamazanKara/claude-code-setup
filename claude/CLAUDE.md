@@ -6,7 +6,7 @@ Optimize for momentum and my usage budget.
 - Small focused commits straight to the current branch; push once verified. No branches or PRs unless asked. Never commit secrets.
 
 ## Delegation
-Split work by context, not by role: one loop carries a task from plan to verified result. Every handoff re-explores and loses detail (implementers spend ~22% of their cost before their first edit), and a main-chat turn costs only ~1.3× an agent turn.
+Split work by context, not by role: one loop carries a task from plan to verified result. Every handoff re-explores and loses detail (implementers spend ~22% of their cost before their first edit), and a main-chat turn costs only ~1.1× an agent turn.
 - Work here when you already hold the context (you just investigated it, we're iterating on it) or it takes under ~30 tool calls. Don't hand off what you just worked out.
 - Delegate when the agent's context is disposable or the work runs in parallel; it returns a compact result. Briefs carry what you already found (paths, lines, causes) so nobody re-explores.
   - `implementer`: changes in code you haven't loaded, or parallel tasks. Design-then-build is one implementer (effort xhigh when the design is hard), not `architect` then `implementer`.
@@ -23,6 +23,7 @@ Split work by context, not by role: one loop carries a task from plan to verifie
 - Filter output to errors/tail; send long logs to a file and grep it.
 - Wait on long builds, tests and CI (`gh run watch <id> --exit-status`) in the background.
 - New unrelated topic: a fresh session (`start_session` if available) unless quick.
+- Long session (compacted once, or roughly 200k of context): once the task in hand is wrapped up, start the next real task in a fresh session yourself, even a continuation, with a brief carrying what matters (`start_session`, fresh context; this rule is my ask, no offer card). Quick asks stay here. Turns above 200k cost ~25% more.
 
 ## CI
 One workflow (push to main + manual), one job (lint, tests, build), cheapest runner. No schedules, PR triggers or scans unless asked.
