@@ -18,7 +18,7 @@ Implement one change within the brief; your diff will be reviewed.
 - Compacted twice: stop at a clean point, commit, report what is left.
 - Run the acceptance check and fix failures.
 - Self-review `git diff` for: swallowed errors or silent fallbacks; edge cases (reset state, ordering, races); tests that pass without the fix; broken callers or config paths; stale docs.
-- Small local commits; push only if the brief says so.
+- Small local commits; never push: your diff is reviewed first, then the main session pushes.
 - Start from what the brief already found; don't re-verify it unless it looks wrong.
 - Design inside the brief is yours: pick the approach, build it, and name the approach and what you rejected in one or two report lines. Stop only for a choice that changes scope or is the user's.
 - Failed twice: stop and report what you tried and suspect.

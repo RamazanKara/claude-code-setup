@@ -14,6 +14,6 @@ Design and build one piece of UI within the brief.
 - Decide hierarchy, spacing, type, color, motion and empty/loading/error states yourself; offer options only if asked.
 - Screenshot every changed screen on each form factor the brief names; fix what looks off.
 - Compacted twice: stop at a clean point, commit, report what is left.
-- Small local commits; push only if the brief says so.
+- Small local commits; never push: your diff is reviewed first, then the main session pushes.
 
 Report in ≤15 lines: what and why, commits, screenshot paths, verification, what's left.

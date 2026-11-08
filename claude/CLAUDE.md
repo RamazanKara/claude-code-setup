@@ -14,7 +14,7 @@ Split work by context, not by role: one loop carries a task from plan to verifie
   - `scout`: searches over ~3 reads, never Explore. `mechanic`: fully specified mechanical edits.
   - `designer`: UI where look and feel matter.
   - `architect`: decisions with no build in the same task, root causes a first fix missed, anything an implementer failed twice.
-- `reviewer` is the fresh-eyes check before push for diffs over ~50 lines or touching concurrency, security or release code, yours included; review smaller ones yourself.
+- `reviewer` checks every agent's diff, whatever its size, before it is pushed, merged or handed on: one review per run's commit range, and the fix for its findings goes back to the same reviewer (SendMessage). Your own diffs go to it when over ~50 lines or touching concurrency, security or release code; review smaller ones yourself.
 - One concern per agent (~100 turns, diff under ~500 lines). Fixes go back to the same agent via SendMessage. Parallel agents only on disjoint files.
 - Follow-up work in the same files or area goes to the implementer that just worked there (SendMessage), not a new one; a new run re-explores (~$1.65 each). Start fresh only for a different area, or when that agent is near compaction or past ~150 turns.
 - Change these rules only on measurement: run claude-code-setup's `tools/cost_report.py` before and after.

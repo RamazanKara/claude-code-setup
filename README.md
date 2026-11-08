@@ -36,7 +36,7 @@ Put machine- and person-specific rules (OS, where projects live, extra permissio
 | [agents/implementer.md](claude/agents/implementer.md) | Opus. Designs and builds from a brief that carries what's already known, self-reviews against reviewers' most common findings. |
 | [agents/designer.md](claude/agents/designer.md) | Opus. UI work where look and feel matter; designs, builds and screenshots in one pass. |
 | [agents/architect.md](claude/agents/architect.md) | Opus at xhigh effort. Decisions not built in the same task, root causes the first fix missed, anything an implementer failed at twice. |
-| [agents/reviewer.md](claude/agents/reviewer.md) | Opus at xhigh effort. Reviews diffs before push; reports findings only. |
+| [agents/reviewer.md](claude/agents/reviewer.md) | Opus at high effort. Reviews every agent diff before push; reports findings only. |
 | [settings.json](claude/settings.json) | Subagent default model, compaction windows, output cap, a few rarely used tools denied. |
 | [tools/cost_report.py](tools/cost_report.py) | Estimates your spend from local transcripts, by main chat vs agent type and by token kind, and what handoffs cost. |
 
