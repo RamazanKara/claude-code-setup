@@ -14,7 +14,7 @@
   "effortLevel": "high",
   "modelSettings": {
     "claude-opus-5-5": {
-      "autoCompactWindow": 300000
+      "autoCompactWindow": 400000
     }
   },
   "autoCompactWindow": 200000

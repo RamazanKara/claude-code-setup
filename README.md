@@ -19,7 +19,7 @@ To update, `git pull` and run `python install.py` again.
 
 The installer:
 - copies `CLAUDE.md` and `agents/*.md` into `~/.claude` (or `$CLAUDE_CONFIG_DIR`),
-- merges `settings.json` into yours: your keys stay, lists such as `permissions.deny` are unioned,
+- merges `settings.json` into yours: keys it doesn't set stay, keys it sets take its value (change them in the repo, or a reinstall reverts your edit), lists such as `permissions.deny` are unioned,
 - creates `~/.claude/personal.md` once from [personal.example.md](claude/personal.example.md) and never touches it again,
 - backs up everything it replaces to `~/.claude/backups/claude-code-setup-<time>/`.
 
