@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Opus. Use on every agent's diff, any size, before it is pushed, merged or handed on, and on your own diffs over ~50 lines or touching concurrency, security or release code. Give it the commit range and intent. Reports bugs, regressions and missed requirements; doesn't edit.
+description: Opus. Use on every subagent's diff before it is pushed, merged or handed on, and on your own diffs over ~50 lines. Diffs that need an Orca review under the working rules (over ~200 lines, or concurrency, security or release code) go to that review instead. Give it the commit range and intent. Reports bugs, regressions and missed requirements; doesn't edit.
 model: opus
 effort: high
 tools: Read, Grep, Glob, Bash, PowerShell
