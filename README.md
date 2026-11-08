@@ -1,64 +1,21 @@
 # claude-code-setup
 
-A global `CLAUDE.md`, seven subagents and a few settings that make Claude Code spend less of your usage budget without slowing you down. Work stays in one loop while it shares context; agents sized for the job take what has disposable context or runs in parallel, and Haiku does the searching, running and waiting.
-
-The rules come from measuring one heavy user's transcripts over a few weeks of daily multi-agent coding (see [Why these rules](#why-these-rules)).
+Minimal autonomous working rules and seven optional Claude agent definitions. Orca manages sessions and workspaces; the global instructions do not impose a delegation workflow.
 
 ## Install
 
-Needs Python 3.8+ and Claude Code.
+Requires Python 3.8+ and Claude Code. Run `python install.py --dry-run`, then `python install.py`.
 
-```bash
-git clone https://github.com/RamazanKara/claude-code-setup.git
-cd claude-code-setup
-python install.py --dry-run   # see what changes
-python install.py
-```
+The installer copies `claude/CLAUDE.md` and `claude/agents/*.md` into `~/.claude` (or `CLAUDE_CONFIG_DIR`), merges `claude/settings.json`, and creates `personal.md` from its example only if absent. Replaced files are backed up under `~/.claude/backups/`.
 
-To update, `git pull` and run `python install.py` again.
+Edit templates here before reinstalling. Keep machine-specific paths in `~/.claude/personal.md`, which the global instructions import. Existing hooks, permissions, credentials and agent definitions are preserved.
 
-The installer:
-- copies `CLAUDE.md` and `agents/*.md` into `~/.claude` (or `$CLAUDE_CONFIG_DIR`),
-- merges `settings.json` into yours: keys it doesn't set stay, keys it sets take its value (change them in the repo, or a reinstall reverts your edit), lists such as `permissions.deny` are unioned,
-- creates `~/.claude/personal.md` once from [personal.example.md](claude/personal.example.md) and never touches it again,
-- backs up everything it replaces to `~/.claude/backups/claude-code-setup-<time>/`.
+## Contents
 
-Put machine- and person-specific rules (OS, where projects live, extra permissions) in `~/.claude/personal.md`; `CLAUDE.md` imports it.
-
-## What's in it
-
-| File | What it does |
-| --- | --- |
-| [CLAUDE.md](claude/CLAUDE.md) | When to work inline vs delegate, which agent gets what, keeping context small, minimal CI, "done means verified". |
-| [agents/scout.md](claude/agents/scout.md) | Haiku, read-only. Finds files, symbols and call sites; replaces the built-in Explore agent, which runs on your main model. |
-| [agents/runner.md](claude/agents/runner.md) | Haiku. Runs builds, tests and scripts; pushes, waits on CI, tags. Never edits code. |
-| [agents/mechanic.md](claude/agents/mechanic.md) | Haiku. Fully specified mechanical edits: renames, version bumps, applying an exact diff. |
-| [agents/implementer.md](claude/agents/implementer.md) | Opus. Designs and builds from a brief that carries what's already known, self-reviews against reviewers' most common findings. |
-| [agents/designer.md](claude/agents/designer.md) | Opus. UI work where look and feel matter; designs, builds and screenshots in one pass. |
-| [agents/architect.md](claude/agents/architect.md) | Opus at xhigh effort. Decisions not built in the same task, root causes the first fix missed, anything an implementer failed at twice. |
-| [agents/reviewer.md](claude/agents/reviewer.md) | Opus at high effort. Reviews every agent diff before push; reports findings only. |
-| [settings.json](claude/settings.json) | Subagent default model, compaction windows, output cap, a few rarely used tools denied. |
-| [tools/cost_report.py](tools/cost_report.py) | Estimates your spend from local transcripts, by main chat vs agent type and by token kind, and what handoffs cost. |
-
-## Before you use it
-
-- **Autonomy.** `CLAUDE.md` lets Claude commit, push and clean up without asking, and commit straight to the current branch. Every confirmation costs a turn. If you want feature branches or PRs, or more freedom (force-push, history rewrites), say so in `personal.md`.
-- **Desktop app.** `start_session` and the designer's built-in browser exist only in the Claude desktop app; the CLI ignores them.
-- **Experimental frontmatter.** `experimental.cacheTtl` and `omitClaudeMd` worked when this was written but may change.
-
-## Why these rules
-
-From transcripts priced at list rates:
-
-- **Context size, not the model, drove agent cost.** Agents with no compaction limit ran to 300k-960k tokens of context and averaged ~$13 a run. Capping `autoCompactWindow` and keeping one concern per agent (~100 turns, diff under ~500 lines) fixed most of that. Haiku agents cap at 100k because Haiku prompts over 100k cost far more.
-- **Opus vs Sonnet for implementing was close to a wash.** Opus needed 6.2 turns per edit, Sonnet 8.9; with cached reads priced the same, Opus came out at about 0.93× Sonnet's cost per edit.
-- **Reviews pay for themselves.** 86% of 123 reviews found something. The top findings (swallowed errors, edge cases, tests that pass without the fix, broken callers, stale docs) are now the implementer's self-review checklist.
-- **Haiku can do a lot of the work.** Searching, running checks and waiting on CI inside implementer runs cost ~$300 in four days on Sonnet; the same runs on Haiku cost a few percent of that.
-- **Split by context, not by role.** Every handoff re-explores: implementers spent 27% of their cost before their first edit, architects 50%, and 26% of main-chat spend went on reacting to agent reports. With Opus implementers a main-chat turn cost only ~1.2× an agent turn (~1.7× against Sonnet). So the main chat finishes what it already has context for, one agent carries a task from design to a verified result, and agents are kept for disposable context, parallel work and the fresh-eyes review. This follows Anthropic's [When to fold subagents into your main agent loop](https://claude.com/resources/articles/building-agents-when-to-fold-subagents-into-your-main-agent-loop).
-- **Don't wait in the main chat.** ~$80 in four days went on turns that only polled CI or ran one git command, hence background `gh run watch` and the runner. Resuming after more than an hour idle re-caches the whole context, so start a fresh session after a long break.
-- **Cache TTL per agent.** Agents that wait (implementer, runner, designer) keep a 1h cache; short-lived ones (reviewer, scout, mechanic, architect) use 5m to skip the 1h write premium.
-
-Run `python tools/cost_report.py --days 7` before and after to see what it does for you; its handoff section shows whether delegating pays off for your work.
+- `claude/CLAUDE.md`: autonomy, focused changes, verification, Git and temporary-output rules.
+- `claude/agents/`: architect, designer, implementer, mechanic, reviewer, runner and scout definitions, available when explicitly useful.
+- `claude/settings.json`: optional output and compaction settings.
+- `tools/cost_report.py`: optional historical transcript analysis; it does not control the workflow.
 
 ## License
 

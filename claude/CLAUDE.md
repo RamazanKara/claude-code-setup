@@ -1,37 +1,11 @@
 # Working rules
-Optimize for momentum and my usage budget.
 
-## Autonomy
-- Standing approval for routine dev actions (commit, push, tag, clean up stale branches/worktrees/artifacts, dev tools, processes and config): don't ask, note it in the summary.
-- Small focused commits straight to the current branch; push once verified. No branches or PRs unless asked. Never commit secrets.
-
-## Delegation
-Split work by context, not by role: one loop carries a task from plan to verified result. Every handoff re-explores and loses detail (implementers spend ~22% of their cost before their first edit), and a main-chat turn costs only ~1.1× an agent turn.
-- Work here when you already hold the context (you just investigated it, we're iterating on it) or it takes under ~30 tool calls. Don't hand off what you just worked out.
-- Delegate when the agent's context is disposable or the work runs in parallel; it returns a compact result. Briefs carry what you already found (paths, lines, causes) so nobody re-explores.
-  - `implementer`: changes in code you haven't loaded, or parallel tasks. Design-then-build is one implementer (effort xhigh when the design is hard), not `architect` then `implementer`.
-  - `runner`: long builds/tests, device runs, push/CI/tag chores, with exact commands, branch and SHA.
-  - `scout`: searches over ~3 reads, never Explore. `mechanic`: fully specified mechanical edits.
-  - `designer`: UI where look and feel matter.
-  - `architect`: decisions with no build in the same task, root causes a first fix missed, anything an implementer failed twice.
-- `reviewer` checks every agent's diff, whatever its size, before it is pushed, merged or handed on: one review per run's commit range, and the fix for its findings goes back to the same reviewer (SendMessage). Your own diffs go to it when over ~50 lines or touching concurrency, security or release code; review smaller ones yourself.
-- One concern per agent (~100 turns, diff under ~500 lines). Fixes go back to the same agent via SendMessage. Parallel agents only on disjoint files.
-- Follow-up work in the same files or area goes to the implementer that just worked there (SendMessage), not a new one; a new run re-explores (~$1.65 each). Start fresh only for a different area, or when that agent is near compaction or past ~150 turns.
-- Change these rules only on measurement: run claude-code-setup's `tools/cost_report.py` before and after.
-
-## Context
-- Filter output to errors/tail; send long logs to a file and grep it.
-- Wait on long builds, tests and CI (`gh run watch <id> --exit-status`) in the background.
-- New unrelated topic: a fresh session (`start_session` if available) unless quick.
-- Long session (compacted once, or roughly 200k of context): once the task in hand is wrapped up, start the next real task in a fresh session yourself, even a continuation, with a brief carrying what matters (`start_session`, fresh context; this rule is my ask, no offer card). Quick asks stay here. Turns above 200k cost ~25% more.
-
-## CI
-One workflow (push to main + manual), one job (lint, tests, build), cheapest runner. No schedules, PR triggers or scans unless asked.
-
-## Done means verified
-Run the tests/build/lint or the app; look at user-facing results. Fix failures instead of reporting them. Say what you couldn't verify.
-
-## Output
-Result first, concise. End with what changed, what was verified, what I need to know.
+- Work autonomously from the request through implementation and verification. Choose routine implementation details yourself; ask only when essential information or a consequential decision cannot be inferred.
+- Prioritize correctness, reliability and maintainability. Inspect relevant code and existing changes, keep the scope focused, and preserve unrelated work and user data.
+- Verify the requested behavior and affected existing behavior with appropriate checks. Add regression coverage where useful, review the final diff, and report anything unverified honestly.
+- For repository changes, commit only the task's changes with a specific conventional message and push to remote `main` after verification, unless the user requests another workflow. Preserve unrelated work; report access or branch-protection blockers.
+- Never commit secrets, force-push, rewrite shared history, open PRs, tag or publish releases unless explicitly requested.
+- Put large disposable build outputs under a task-specific directory in `D:\CodexArtifacts` when available. Clean up your reproducible temporary outputs after verification; preserve deliverables, shared dependencies and active work.
+- Keep communication concise: result, consequential decisions, verification and remaining limitations.
 
 @~/.claude/personal.md
