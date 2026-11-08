@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Install this setup into ~/.claude.
+"""Install this setup into ~/.claude and the other installed agents.
 
 Copies CLAUDE.md and the agents, merges settings.json into your existing one,
-and creates ~/.claude/personal.md from the example once. Anything it replaces
-is backed up to ~/.claude/backups/claude-code-setup-<time>/ first.
+and creates ~/.claude/personal.md from the example once. The same rules, with
+personal.md inlined, are written for every other installed agent: Codex
+(~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
+(~/.gemini/GEMINI.md). Anything it replaces is backed up to
+~/.claude/backups/claude-code-setup-<time>/ first.
 
-  python install.py            # install, or update after `git pull`
+  python install.py            # install, or update after `git pull` or editing personal.md
   python install.py --dry-run  # show what would change
 """
 import argparse, datetime, filecmp, json, os, shutil
@@ -13,6 +16,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent / 'claude'
 HOME = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
+SHARED = {
+    'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'AGENTS.md',
+    'opencode': Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode' / 'AGENTS.md',
+    'antigravity': Path.home() / '.gemini' / 'GEMINI.md',
+}
 
 
 def merge(base, extra):
@@ -27,16 +35,32 @@ def merge(base, extra):
     return base
 
 
+def label(dst):
+    try:
+        return str(dst.relative_to(HOME))
+    except ValueError:
+        return str(dst)
+
+
+def shared_rules(personal):
+    """CLAUDE.md for agents without @imports: drop import lines, inline personal.md."""
+    rules = [l for l in (REPO / 'CLAUDE.md').read_text(encoding='utf-8').splitlines() if not l.startswith('@')]
+    text = '\n'.join(rules).rstrip() + '\n'
+    if personal.exists():
+        text += '\n' + personal.read_text(encoding='utf-8').strip() + '\n'
+    return text
+
+
 class Installer:
     def __init__(self, dry):
         self.dry, self.saved = dry, False
         self.backup = HOME / 'backups' / ('claude-code-setup-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
 
-    def save(self, dst):
+    def save(self, dst, name=None):
         if not dst.exists() and not dst.is_symlink():
             return
-        rel = dst.relative_to(HOME)
-        print(f'  backup  {rel}')
+        rel = Path(name) / dst.name if name else dst.relative_to(HOME)
+        print(f'  backup  {label(dst)}')
         self.saved = True
         if not self.dry:
             if dst.exists():
@@ -48,7 +72,7 @@ class Installer:
         if dst.is_file() and not dst.is_symlink() and filecmp.cmp(src, dst, shallow=False):
             return
         self.save(dst)
-        print(f'  copy    {dst.relative_to(HOME)}')
+        print(f'  copy    {label(dst)}')
         if not self.dry:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
@@ -64,6 +88,18 @@ class Installer:
         if not self.dry:
             dst.write_text(json.dumps(new, indent=2) + '\n', encoding='utf-8')
 
+    def shared(self, personal):
+        text = shared_rules(personal)
+        for name, dst in SHARED.items():
+            if not dst.parent.is_dir():
+                continue
+            if dst.is_file() and not dst.is_symlink() and dst.read_text(encoding='utf-8') == text:
+                continue
+            self.save(dst, name)
+            print(f'  write   {label(dst)}')
+            if not self.dry:
+                dst.write_text(text, encoding='utf-8', newline='\n')
+
     def run(self):
         print(f'Installing into {HOME}' + (' (dry run)' if self.dry else ''))
         self.place(REPO / 'CLAUDE.md', HOME / 'CLAUDE.md')
@@ -75,6 +111,7 @@ class Installer:
             print('  create  personal.md (edit it: your OS, project paths, extra rules)')
             if not self.dry:
                 shutil.copy2(REPO / 'personal.example.md', personal)
+        self.shared(personal if personal.exists() else REPO / 'personal.example.md')
         if self.saved:
             print(f'Backups in {self.backup}')
         print('Done. Restart Claude Code (agents reload on the next message).')
