@@ -10,6 +10,12 @@
         "claude-haiku-5-5": { "limit": { "context": 470000 } },
         "claude-fable-5-1": { "limit": { "context": 470000 } }
       }
+    },
+    "opencode-go": {
+      "models": {
+        "gemini-4-argon": { "limit": { "context": 470000 } },
+        "kimi-k3.1-pro": { "limit": { "context": 470000 } }
+      }
     }
   },
   "agents": {
