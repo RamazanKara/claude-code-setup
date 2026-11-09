@@ -6,7 +6,9 @@ and creates ~/.claude/personal.md from the example once. The same rules, with
 personal.md inlined, are written for every other installed agent: Codex
 (~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
 (~/.gemini/GEMINI.md). opencode/opencode.json is merged into OpenCode's global
-config. Anything it replaces is backed up to
+config and opencode/agents/ holds the DeepSeek helper agents every agent can
+call through `opencode run`; the Haiku Claude agents they replace are removed.
+Anything it replaces is backed up to
 ~/.claude/backups/claude-code-setup-<time>/ first.
 
 Orca's Claude profiles set CLAUDE_CONFIG_DIR and import ~/.claude/CLAUDE.md,
@@ -23,6 +25,8 @@ REPO = ROOT / 'claude'
 _cfg = os.environ.get('CLAUDE_CONFIG_DIR')
 HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
 OPENCODE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode'
+# Haiku-tier Claude agents replaced by the DeepSeek helpers in opencode/agents.
+RETIRED_AGENTS = ('mechanic', 'runner', 'scout')
 SHARED = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'AGENTS.md',
     'opencode': OPENCODE / 'AGENTS.md',
@@ -75,10 +79,10 @@ class Installer:
                 shutil.copy2(dst, self.backup / rel)
             dst.unlink()
 
-    def place(self, src, dst):
+    def place(self, src, dst, name=None):
         if dst.is_file() and not dst.is_symlink() and filecmp.cmp(src, dst, shallow=False):
             return
-        self.save(dst)
+        self.save(dst, name)
         print(f'  copy    {label(dst)}')
         if not self.dry:
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -110,6 +114,8 @@ class Installer:
     def opencode(self):
         if not OPENCODE.is_dir():
             return
+        for src in sorted((ROOT / 'opencode' / 'agents').glob('*.md')):
+            self.place(src, OPENCODE / 'agents' / src.name, 'opencode-agents')
         dst = next((OPENCODE / n for n in ('opencode.jsonc', 'opencode.json') if (OPENCODE / n).is_file()), OPENCODE / 'opencode.jsonc')
         try:
             cur = json.loads(dst.read_text(encoding='utf-8')) if dst.is_file() else {}
@@ -129,6 +135,11 @@ class Installer:
         self.place(REPO / 'CLAUDE.md', HOME / 'CLAUDE.md')
         for src in sorted((REPO / 'agents').glob('*.md')):
             self.place(src, HOME / 'agents' / src.name)
+        for name in RETIRED_AGENTS:
+            dst = HOME / 'agents' / f'{name}.md'
+            if dst.is_file() and not (REPO / 'agents' / dst.name).exists():
+                self.save(dst)
+                print(f'  remove  {label(dst)}')
         self.settings()
         personal = HOME / 'personal.md'
         if not personal.exists():
