@@ -1,7 +1,17 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "model": "opencode-go/deepseek-v4.1-flash",
-  "compaction": { "buffer": "60%" },
+  "providers": {
+    "anthropic": {
+      "models": {
+        "claude-opus-5-5": { "limit": { "context": 470000 } },
+        "claude-opus-5-5-fast": { "limit": { "context": 470000 } },
+        "claude-sonnet-5-5": { "limit": { "context": 470000 } },
+        "claude-haiku-5-5": { "limit": { "context": 470000 } },
+        "claude-fable-5-1": { "limit": { "context": 470000 } }
+      }
+    }
+  },
   "agents": {
     "explore": { "model": "opencode-go/deepseek-v4.1-flash" },
     "general": { "disabled": true },
