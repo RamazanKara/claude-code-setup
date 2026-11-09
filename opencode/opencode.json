@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-opus-5-5",
+  "agents": {
+    "explore": { "model": "opencode-go/deepseek-v4.1-flash" },
+    "title": { "model": "opencode-go/deepseek-v4.1-flash" },
+    "summary": { "model": "opencode-go/deepseek-v4.1-flash" }
+  },
+  "permissions": [
+    { "action": "skill", "resource": "built-in-browser", "effect": "deny" },
+    { "action": "skill", "resource": "chrome-browser", "effect": "deny" },
+    { "action": "skill", "resource": "computer-use", "effect": "deny" },
+    { "action": "skill", "resource": "docs", "effect": "deny" }
+  ]
+}

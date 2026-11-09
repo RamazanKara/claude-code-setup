@@ -5,8 +5,12 @@ Copies CLAUDE.md and the agents, merges settings.json into your existing one,
 and creates ~/.claude/personal.md from the example once. The same rules, with
 personal.md inlined, are written for every other installed agent: Codex
 (~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
-(~/.gemini/GEMINI.md). Anything it replaces is backed up to
+(~/.gemini/GEMINI.md). opencode/opencode.json is merged into OpenCode's global
+config. Anything it replaces is backed up to
 ~/.claude/backups/claude-code-setup-<time>/ first.
+
+Orca's Claude profiles set CLAUDE_CONFIG_DIR and import ~/.claude/CLAUDE.md,
+so the installer ignores that variable when it points into an Orca profile.
 
   python install.py            # install, or update after `git pull` or editing personal.md
   python install.py --dry-run  # show what would change
@@ -14,11 +18,14 @@ personal.md inlined, are written for every other installed agent: Codex
 import argparse, datetime, filecmp, json, os, shutil
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent / 'claude'
-HOME = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
+ROOT = Path(__file__).resolve().parent
+REPO = ROOT / 'claude'
+_cfg = os.environ.get('CLAUDE_CONFIG_DIR')
+HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
+OPENCODE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode'
 SHARED = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'AGENTS.md',
-    'opencode': Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode' / 'AGENTS.md',
+    'opencode': OPENCODE / 'AGENTS.md',
     'antigravity': Path.home() / '.gemini' / 'GEMINI.md',
 }
 
@@ -100,6 +107,23 @@ class Installer:
             if not self.dry:
                 dst.write_text(text, encoding='utf-8', newline='\n')
 
+    def opencode(self):
+        if not OPENCODE.is_dir():
+            return
+        dst = next((OPENCODE / n for n in ('opencode.jsonc', 'opencode.json') if (OPENCODE / n).is_file()), OPENCODE / 'opencode.jsonc')
+        try:
+            cur = json.loads(dst.read_text(encoding='utf-8')) if dst.is_file() else {}
+        except json.JSONDecodeError:
+            print(f'  skip    {dst} (not plain JSON; merge opencode/opencode.json by hand)')
+            return
+        new = merge(json.loads(json.dumps(cur)), json.loads((ROOT / 'opencode' / 'opencode.json').read_text(encoding='utf-8')))
+        if new == cur:
+            return
+        self.save(dst, 'opencode')
+        print(f'  merge   {dst}')
+        if not self.dry:
+            dst.write_text(json.dumps(new, indent=2) + '\n', encoding='utf-8', newline='\n')
+
     def run(self):
         print(f'Installing into {HOME}' + (' (dry run)' if self.dry else ''))
         self.place(REPO / 'CLAUDE.md', HOME / 'CLAUDE.md')
@@ -112,6 +136,7 @@ class Installer:
             if not self.dry:
                 shutil.copy2(REPO / 'personal.example.md', personal)
         self.shared(personal if personal.exists() else REPO / 'personal.example.md')
+        self.opencode()
         if self.saved:
             print(f'Backups in {self.backup}')
         print('Done. Restart Claude Code (agents reload on the next message).')

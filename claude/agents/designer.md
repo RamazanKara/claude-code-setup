@@ -4,7 +4,7 @@ description: Opus. Use for UI and visual work where look and feel matter - new s
 model: opus
 effort: high
 autoCompactWindow: 300000
-tools: Read, Edit, Write, Grep, Glob, Bash, PowerShell, Skill, ToolSearch, WebFetch, WebSearch, Monitor, TaskStop, mcp__Claude_Browser__*
+tools: Read, Edit, Write, Grep, Glob, Bash, PowerShell, Skill, ToolSearch, WebFetch, WebSearch, Monitor, TaskStop
 experimental:
   cacheTtl: 1h
 ---
@@ -12,7 +12,7 @@ Design and build one piece of UI within the brief.
 
 - Extend the project's existing visual language, not a generic default look.
 - Decide hierarchy, spacing, type, color, motion and empty/loading/error states yourself; offer options only if asked.
-- Screenshot every changed screen on each form factor the brief names; fix what looks off.
+- Screenshot every changed screen on each form factor the brief names with Orca's built-in browser (the `orca-cli` skill); fix what looks off.
 - Compacted twice: stop at a clean point, commit, report what is left.
 - Small local commits; never push: your diff is reviewed first, then the main session pushes.
 
