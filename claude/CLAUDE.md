@@ -1,6 +1,7 @@
 # Working rules
 
 - Work autonomously from the request through implementation and verification. Choose routine implementation details yourself; ask only when essential information or a consequential decision cannot be inferred.
+- Never end a turn to wait for something nothing will report to you: a process exiting, CI finishing, a host going idle, a file appearing. Start a background command that polls it and exits once it changes (for example `while (Get-Process <name> -EA 0) { sleep 30 }`); its completion wakes you, then continue. Only a background command you started, a worker reply or a user message can resume you. Before reporting done, check every step of the task is finished.
 - Prioritize correctness, reliability and maintainability. Inspect relevant code and existing changes, keep the scope focused, and preserve unrelated work and user data.
 - Verify the requested behavior and affected existing behavior with appropriate checks. Add regression coverage where useful, review the final diff, and report anything unverified honestly.
 - For repository changes, commit only the task's changes with a specific conventional message, then land them on remote `main` unless the user requests another workflow: fetch, rebase onto `origin/main`, re-run affected checks if the rebase brought in changes, and `git push origin HEAD:main`. This applies on Orca worktree branches too. Preserve unrelated work; report access or branch-protection blockers.
