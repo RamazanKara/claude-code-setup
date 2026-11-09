@@ -15,9 +15,10 @@ Edit templates here before reinstalling. Keep machine-specific paths in `~/.clau
 - `claude/CLAUDE.md`: autonomy, focused changes, verification, Git landing, Orca worktrees, cross-agent review, lean context, delegation by context and temporary-output rules.
 - `claude/agents/`: Opus architect, designer, implementer and reviewer; Haiku scout (searches), runner (builds, tests, chores) and mechanic (exact edits). Orca shows them under their Claude session.
 - `claude/settings.json`: compaction settings, and hides the Claude desktop app's browser, computer-use and docs skills, which don't work outside it.
-- `opencode/opencode.json`: Opus as OpenCode's default model; Anthropic's 1-hour prompt cache, so pauses over 5 minutes don't re-write the whole context; compaction at 40% of the window (400k on 1M-token models) instead of 85%; DeepSeek V4.1 Flash (OpenCode Go) for the `explore`, title and summary agents; the built-in `general` subagent turned off, because it runs on the session's model and Orca doesn't show OpenCode subagents; and the same hidden desktop skills.
+- `opencode/opencode.json`: Opus as OpenCode's default model; compaction at 40% of the window (400k on 1M-token models, matching Claude Code's main session) instead of 85%; DeepSeek V4.1 Flash (OpenCode Go) for the `explore`, title and summary agents; the built-in `general` subagent turned off, because it runs on the session's model and Orca doesn't show OpenCode subagents; and the same hidden desktop skills.
 - `opencode/agents/`: DeepSeek V4.1 Flash `runner` and `mechanic` subagents for OpenCode.
 - `tools/cost_report.py`: optional historical transcript analysis; it does not control the workflow.
+- `tools/opencode_cost.py`: where OpenCode's Anthropic spend goes: cost split, context sizes, what fills the context, and the 5-minute vs 1-hour cache trade-off.
 
 DeepSeek Orca workers (`orca orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash`) need the plain OpenCode launcher enabled in Orca's agent settings.
 
