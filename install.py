@@ -6,9 +6,8 @@ and creates ~/.claude/personal.md from the example once. The same rules, with
 personal.md inlined, are written for every other installed agent: Codex
 (~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
 (~/.gemini/GEMINI.md). opencode/opencode.json is merged into OpenCode's global
-config. Retired helper agents, replaced by DeepSeek Orca workers, are removed
-from Claude and OpenCode.
-Anything it replaces is backed up to
+config and opencode/agents/ is copied into its agents directory. Anything it
+replaces is backed up to
 ~/.claude/backups/claude-code-setup-<time>/ first.
 
 Orca's Claude profiles set CLAUDE_CONFIG_DIR and import ~/.claude/CLAUDE.md,
@@ -25,9 +24,6 @@ REPO = ROOT / 'claude'
 _cfg = os.environ.get('CLAUDE_CONFIG_DIR')
 HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
 OPENCODE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode'
-# Helper agents replaced by DeepSeek Orca workers, which Orca can show and stop.
-RETIRED_AGENTS = ('mechanic', 'runner', 'scout')
-RETIRED_OPENCODE_AGENTS = ('mechanic', 'runner')
 SHARED = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'AGENTS.md',
     'opencode': OPENCODE / 'AGENTS.md',
@@ -115,11 +111,8 @@ class Installer:
     def opencode(self):
         if not OPENCODE.is_dir():
             return
-        for name in RETIRED_OPENCODE_AGENTS:
-            old = OPENCODE / 'agents' / f'{name}.md'
-            if old.is_file():
-                self.save(old, 'opencode-agents')
-                print(f'  remove  {old}')
+        for src in sorted((ROOT / 'opencode' / 'agents').glob('*.md')):
+            self.place(src, OPENCODE / 'agents' / src.name, 'opencode-agents')
         dst = next((OPENCODE / n for n in ('opencode.jsonc', 'opencode.json') if (OPENCODE / n).is_file()), OPENCODE / 'opencode.jsonc')
         try:
             cur = json.loads(dst.read_text(encoding='utf-8')) if dst.is_file() else {}
@@ -139,11 +132,6 @@ class Installer:
         self.place(REPO / 'CLAUDE.md', HOME / 'CLAUDE.md')
         for src in sorted((REPO / 'agents').glob('*.md')):
             self.place(src, HOME / 'agents' / src.name)
-        for name in RETIRED_AGENTS:
-            dst = HOME / 'agents' / f'{name}.md'
-            if dst.is_file() and not (REPO / 'agents' / dst.name).exists():
-                self.save(dst)
-                print(f'  remove  {label(dst)}')
         self.settings()
         personal = HOME / 'personal.md'
         if not personal.exists():
