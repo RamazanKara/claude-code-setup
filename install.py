@@ -6,8 +6,8 @@ and creates ~/.claude/personal.md from the example once. The same rules, with
 personal.md inlined, are written for every other installed agent: Codex
 (~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
 (~/.gemini/GEMINI.md). opencode/opencode.json is merged into OpenCode's global
-config and opencode/agents/ holds the DeepSeek helper agents every agent can
-call through `opencode run`; the Haiku Claude agents they replace are removed.
+config, opencode/agents/ holds OpenCode's DeepSeek helper subagents, and the
+Haiku Claude agents they replace are removed.
 Anything it replaces is backed up to
 ~/.claude/backups/claude-code-setup-<time>/ first.
 
@@ -25,7 +25,7 @@ REPO = ROOT / 'claude'
 _cfg = os.environ.get('CLAUDE_CONFIG_DIR')
 HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
 OPENCODE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode'
-# Haiku-tier Claude agents replaced by the DeepSeek helpers in opencode/agents.
+# Haiku-tier Claude agents replaced by DeepSeek: OpenCode subagents and Orca workers.
 RETIRED_AGENTS = ('mechanic', 'runner', 'scout')
 SHARED = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'AGENTS.md',

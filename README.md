@@ -16,7 +16,7 @@ Edit templates here before reinstalling. Keep machine-specific paths in `~/.clau
 - `claude/agents/`: architect, designer, implementer and reviewer definitions (Opus), available when explicitly useful.
 - `claude/settings.json`: compaction settings, and hides the Claude desktop app's browser, computer-use and docs skills, which don't work outside it.
 - `opencode/opencode.json`: OpenCode's default model, DeepSeek V4.1 Flash (OpenCode Go) for its `explore`, title and summary agents, and the same hidden desktop skills.
-- `opencode/agents/`: DeepSeek V4.1 Flash `runner` (builds, tests, chores) and `mechanic` (exact edits) helpers. With `explore` they take the Haiku-level work: OpenCode uses them as subagents, and Claude Code, Codex and Antigravity call them with `opencode run --agent <name> --archived --auto "<brief>"`.
+- `opencode/agents/`: DeepSeek V4.1 Flash `runner` (builds, tests, chores) and `mechanic` (exact edits) subagents for OpenCode. With `explore` they take its Haiku-level work. Claude Code, Codex and Antigravity hand the same work to DeepSeek as Orca workers (`orca orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash`), which needs the OpenCode launcher enabled in Orca's agent settings.
 - `tools/cost_report.py`: optional historical transcript analysis; it does not control the workflow.
 
 ## License
