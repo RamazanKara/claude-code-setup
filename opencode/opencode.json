@@ -3,6 +3,7 @@
   "model": "anthropic/claude-opus-5-5",
   "agents": {
     "explore": { "model": "opencode-go/deepseek-v4.1-flash" },
+    "general": { "disabled": true },
     "title": { "model": "opencode-go/deepseek-v4.1-flash" },
     "summary": { "model": "opencode-go/deepseek-v4.1-flash" }
   },

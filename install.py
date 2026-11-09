@@ -6,8 +6,8 @@ and creates ~/.claude/personal.md from the example once. The same rules, with
 personal.md inlined, are written for every other installed agent: Codex
 (~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
 (~/.gemini/GEMINI.md). opencode/opencode.json is merged into OpenCode's global
-config, opencode/agents/ holds OpenCode's DeepSeek helper subagents, and the
-Haiku Claude agents they replace are removed.
+config. Retired helper agents, replaced by DeepSeek Orca workers, are removed
+from Claude and OpenCode.
 Anything it replaces is backed up to
 ~/.claude/backups/claude-code-setup-<time>/ first.
 
@@ -25,8 +25,9 @@ REPO = ROOT / 'claude'
 _cfg = os.environ.get('CLAUDE_CONFIG_DIR')
 HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
 OPENCODE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode'
-# Haiku-tier Claude agents replaced by DeepSeek: OpenCode subagents and Orca workers.
+# Helper agents replaced by DeepSeek Orca workers, which Orca can show and stop.
 RETIRED_AGENTS = ('mechanic', 'runner', 'scout')
+RETIRED_OPENCODE_AGENTS = ('mechanic', 'runner')
 SHARED = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'AGENTS.md',
     'opencode': OPENCODE / 'AGENTS.md',
@@ -114,8 +115,11 @@ class Installer:
     def opencode(self):
         if not OPENCODE.is_dir():
             return
-        for src in sorted((ROOT / 'opencode' / 'agents').glob('*.md')):
-            self.place(src, OPENCODE / 'agents' / src.name, 'opencode-agents')
+        for name in RETIRED_OPENCODE_AGENTS:
+            old = OPENCODE / 'agents' / f'{name}.md'
+            if old.is_file():
+                self.save(old, 'opencode-agents')
+                print(f'  remove  {old}')
         dst = next((OPENCODE / n for n in ('opencode.jsonc', 'opencode.json') if (OPENCODE / n).is_file()), OPENCODE / 'opencode.jsonc')
         try:
             cur = json.loads(dst.read_text(encoding='utf-8')) if dst.is_file() else {}
