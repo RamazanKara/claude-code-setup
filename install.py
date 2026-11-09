@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install this setup into ~/.claude and the other installed agents.
 
-Copies CLAUDE.md and merges settings.json into your existing one,
+Copies CLAUDE.md and optional helper agents, and merges settings.json into your existing one,
 and creates ~/.claude/personal.md from the example once. The same rules, with
 personal.md inlined, are written for every other installed agent: Codex
 (~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
@@ -33,12 +33,7 @@ RETIRED_AGENTS = {
     'claude/architect.md': '9542ffe407ed1894aeddf7549a4f741616ea7fa3076d70a12e42f622ee9218a2',
     'claude/designer.md': 'c77acd7c49f9dc8b2ab05262dc7ec15e2b5e13f3247719703a17796dd16da269',
     'claude/implementer.md': 'ef1e6edbf9a7fc10760df32522ec101751ba0aa21bd3f6d7d024b6e3b66b3479',
-    'claude/mechanic.md': 'a125e029fad077c0c356583ede257223fe13cf7c8e5c232e24165acfefc18f67',
     'claude/reviewer.md': 'f95a910b92760caf14010455f749de6936ace734bd5ae268fb7448520d1d37a3',
-    'claude/runner.md': 'e38f4398524219d96fbc4cacfb2c525c9e5e2992d1f0d80a877651b4f4b25f1e',
-    'claude/scout.md': '6bff38553c58326991ff476c6a98c5ea28291c66bdf9152be848063e7cbc331b',
-    'opencode/mechanic.md': '5e959132aa3f19537b48597a73d59f190abdb2dac5f0e14e1bacbb1be8270a2d',
-    'opencode/runner.md': '2a526c7ca3f88b5c52f7c8fc4bd2cc5ba4d7fd947ba5193efcf6b62692d5999a',
 }
 
 
@@ -190,6 +185,13 @@ class Installer:
                 self.save(dst, harness + '-agents')
                 print(f'  remove  {label(dst)}')
 
+    def install_agents(self):
+        for harness, directory in (('claude', HOME), ('opencode', OPENCODE)):
+            if not directory.is_dir():
+                continue
+            for src in sorted((ROOT / harness / 'agents').glob('*.md')):
+                self.place(src, directory / 'agents' / src.name, harness + '-agents')
+
     def opencode(self):
         if not OPENCODE.is_dir():
             return
@@ -211,6 +213,7 @@ class Installer:
         print(f'Installing into {HOME}' + (' (dry run)' if self.dry else ''))
         self.place(REPO / 'CLAUDE.md', HOME / 'CLAUDE.md')
         self.retire_agents()
+        self.install_agents()
         self.settings()
         self.settings('settings.local.json')
         personal = HOME / 'personal.md'

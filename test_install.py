@@ -74,6 +74,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(install.read_json(home / 'settings.json'), original)
                 self.assertTrue((agents / 'old.md').exists())
                 self.assertFalse((home / 'CLAUDE.md').exists())
+                self.assertFalse((agents / 'scout.md').exists())
                 first = install.Installer(False)
                 first.run()
                 settings = install.read_json(home / 'settings.json')
@@ -84,6 +85,15 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((agents / 'old.md').exists())
                 self.assertTrue((first.backup / 'claude-agents/old.md').exists())
                 self.assertTrue((agents / 'custom.md').exists())
+                for harness, directory, names in (
+                    ('claude', home, ('scout', 'runner', 'mechanic')),
+                    ('opencode', opencode, ('runner', 'mechanic')),
+                ):
+                    for name in names:
+                        dst = directory / 'agents' / (name + '.md')
+                        self.assertEqual(dst.read_bytes(),
+                                         (install.ROOT / harness / 'agents' / dst.name).read_bytes())
+                        self.assertNotIn('effect: deny', dst.read_text(encoding='utf-8'))
                 self.assertEqual(install.read_json(home / 'settings.local.json'), {})
                 self.assertNotIn('agents', install.read_json(opencode / 'opencode.jsonc'))
                 self.assertNotIn('permissions', install.read_json(opencode / 'opencode.jsonc'))
