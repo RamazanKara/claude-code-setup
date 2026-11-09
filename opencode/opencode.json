@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "anthropic/claude-opus-5-5",
+  "model": "opencode-go/deepseek-v4.1-flash",
   "compaction": { "buffer": "60%" },
   "agents": {
     "explore": { "model": "opencode-go/deepseek-v4.1-flash" },
@@ -12,6 +12,7 @@
     { "action": "skill", "resource": "built-in-browser", "effect": "deny" },
     { "action": "skill", "resource": "chrome-browser", "effect": "deny" },
     { "action": "skill", "resource": "computer-use", "effect": "deny" },
-    { "action": "skill", "resource": "docs", "effect": "deny" }
+    { "action": "skill", "resource": "docs", "effect": "deny" },
+    { "action": "shell", "resource": "*anthropic/claude*", "effect": "deny" }
   ]
 }
