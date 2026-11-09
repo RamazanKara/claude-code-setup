@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Install this setup into ~/.claude and the other installed agents.
 
-Copies CLAUDE.md and the agents, merges settings.json into your existing one,
+Copies CLAUDE.md and merges settings.json into your existing one,
 and creates ~/.claude/personal.md from the example once. The same rules, with
 personal.md inlined, are written for every other installed agent: Codex
 (~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
 (~/.gemini/GEMINI.md). opencode/opencode.json is merged into OpenCode's global
-config and opencode/agents/ is copied into its agents directory. Anything it
-replaces is backed up to
-~/.claude/backups/claude-code-setup-<time>/ first.
+config. Retired helper definitions, deny rules and workflow overrides are removed.
+Anything it replaces is backed up to ~/.claude/backups/claude-code-setup-<time>/ first.
 
 Orca's Claude profiles set CLAUDE_CONFIG_DIR and import ~/.claude/CLAUDE.md,
 so the installer ignores that variable when it points into an Orca profile.
@@ -16,7 +15,7 @@ so the installer ignores that variable when it points into an Orca profile.
   python install.py            # install, or update after `git pull` or editing personal.md
   python install.py --dry-run  # show what would change
 """
-import argparse, datetime, filecmp, json, os, shutil
+import argparse, datetime, filecmp, hashlib, json, os, re, shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -29,6 +28,78 @@ SHARED = {
     'opencode': OPENCODE / 'AGENTS.md',
     'antigravity': Path.home() / '.gemini' / 'GEMINI.md',
 }
+# Only remove the definitions shipped by this setup; preserve user replacements.
+RETIRED_AGENTS = {
+    'claude/architect.md': '9542ffe407ed1894aeddf7549a4f741616ea7fa3076d70a12e42f622ee9218a2',
+    'claude/designer.md': 'c77acd7c49f9dc8b2ab05262dc7ec15e2b5e13f3247719703a17796dd16da269',
+    'claude/implementer.md': 'ef1e6edbf9a7fc10760df32522ec101751ba0aa21bd3f6d7d024b6e3b66b3479',
+    'claude/mechanic.md': 'a125e029fad077c0c356583ede257223fe13cf7c8e5c232e24165acfefc18f67',
+    'claude/reviewer.md': 'f95a910b92760caf14010455f749de6936ace734bd5ae268fb7448520d1d37a3',
+    'claude/runner.md': 'e38f4398524219d96fbc4cacfb2c525c9e5e2992d1f0d80a877651b4f4b25f1e',
+    'claude/scout.md': '6bff38553c58326991ff476c6a98c5ea28291c66bdf9152be848063e7cbc331b',
+    'opencode/mechanic.md': '5e959132aa3f19537b48597a73d59f190abdb2dac5f0e14e1bacbb1be8270a2d',
+    'opencode/runner.md': '2a526c7ca3f88b5c52f7c8fc4bd2cc5ba4d7fd947ba5193efcf6b62692d5999a',
+}
+
+
+def read_json(path):
+    """Read JSON or JSONC without treating comment markers inside strings as comments."""
+    text = path.read_text(encoding='utf-8-sig')
+    quoted = r'"(?:\\.|[^"\\])*"'
+    text = re.sub(quoted + r'|//[^\r\n]*|/\*.*?\*/',
+                  lambda m: m[0] if m[0].startswith('"') else '', text, flags=re.S)
+    text = re.sub(quoted + r'|,(?=\s*[}\]])',
+                  lambda m: '' if m[0] == ',' else m[0], text)
+    return json.loads(text)
+
+
+def without_denies(value):
+    if isinstance(value, dict):
+        return {k: without_denies(v) for k, v in value.items() if k != 'deny' and v != 'deny'}
+    if isinstance(value, list):
+        return [without_denies(v) for v in value
+                if v != 'deny' and not (isinstance(v, dict) and v.get('effect') == 'deny')]
+    return value
+
+
+def clean_permissions(config):
+    for key in ('permission', 'permissions'):
+        if key in config:
+            if config[key] == 'deny':
+                del config[key]
+                continue
+            config[key] = without_denies(config[key])
+            if not config[key]:
+                del config[key]
+
+
+def clean_claude(config):
+    clean_permissions(config)
+    overrides = config.get('skillOverrides', {})
+    for skill in ('built-in-browser', 'chrome-browser', 'computer-use', 'docs'):
+        if overrides.get(skill) == 'off':
+            del overrides[skill]
+    if not overrides:
+        config.pop('skillOverrides', None)
+
+
+def clean_opencode(config):
+    clean_permissions(config)
+    agents = config.get('agents', {})
+    for name in ('explore', 'title', 'summary'):
+        if agents.get(name, {}).get('model') == 'opencode-go/deepseek-v4.1-flash':
+            del agents[name]['model']
+            if not agents[name]:
+                del agents[name]
+    if agents.get('general', {}).get('disabled') is True:
+        del agents['general']['disabled']
+        if not agents['general']:
+            del agents['general']
+    if not agents:
+        config.pop('agents', None)
+    opus = config.get('providers', {}).get('anthropic', {}).get('models', {}).get('claude-opus-5-5', {})
+    if opus.get('settings') == {'thinking': {'type': 'adaptive', 'display': 'summarized'}, 'effort': 'medium'}:
+        del opus['settings']
 
 
 def merge(base, extra):
@@ -85,16 +156,19 @@ class Installer:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
-    def settings(self):
-        dst = HOME / 'settings.json'
-        cur = json.loads(dst.read_text(encoding='utf-8')) if dst.exists() else {}
-        new = merge(json.loads(json.dumps(cur)), json.loads((REPO / 'settings.json').read_text(encoding='utf-8')))
+    def settings(self, name='settings.json'):
+        dst = HOME / name
+        cur = read_json(dst) if dst.exists() else {}
+        new = json.loads(json.dumps(cur))
+        if name == 'settings.json':
+            merge(new, read_json(REPO / 'settings.json'))
+        clean_claude(new)
         if new == cur:
             return
         self.save(dst)
-        print('  merge   settings.json')
+        print(f'  merge   {name}')
         if not self.dry:
-            dst.write_text(json.dumps(new, indent=2) + '\n', encoding='utf-8')
+            dst.write_text(json.dumps(new, indent=2) + '\n', encoding='utf-8', newline='\n')
 
     def shared(self, personal):
         text = shared_rules(personal)
@@ -108,18 +182,24 @@ class Installer:
             if not self.dry:
                 dst.write_text(text, encoding='utf-8', newline='\n')
 
+    def retire_agents(self):
+        for name, digest in RETIRED_AGENTS.items():
+            harness, filename = name.split('/')
+            dst = (HOME if harness == 'claude' else OPENCODE) / 'agents' / filename
+            if dst.is_file() and hashlib.sha256(dst.read_text(encoding='utf-8').encode()).hexdigest() == digest:
+                self.save(dst, harness + '-agents')
+                print(f'  remove  {label(dst)}')
+
     def opencode(self):
         if not OPENCODE.is_dir():
             return
-        for src in sorted((ROOT / 'opencode' / 'agents').glob('*.md')):
-            self.place(src, OPENCODE / 'agents' / src.name, 'opencode-agents')
         dst = next((OPENCODE / n for n in ('opencode.jsonc', 'opencode.json') if (OPENCODE / n).is_file()), OPENCODE / 'opencode.jsonc')
         try:
-            cur = json.loads(dst.read_text(encoding='utf-8')) if dst.is_file() else {}
+            cur = read_json(dst) if dst.is_file() else {}
         except json.JSONDecodeError:
-            print(f'  skip    {dst} (not plain JSON; merge opencode/opencode.json by hand)')
-            return
-        new = merge(json.loads(json.dumps(cur)), json.loads((ROOT / 'opencode' / 'opencode.json').read_text(encoding='utf-8')))
+            raise ValueError(f'Invalid OpenCode config: {dst}')
+        new = merge(json.loads(json.dumps(cur)), read_json(ROOT / 'opencode' / 'opencode.json'))
+        clean_opencode(new)
         if new == cur:
             return
         self.save(dst, 'opencode')
@@ -130,9 +210,9 @@ class Installer:
     def run(self):
         print(f'Installing into {HOME}' + (' (dry run)' if self.dry else ''))
         self.place(REPO / 'CLAUDE.md', HOME / 'CLAUDE.md')
-        for src in sorted((REPO / 'agents').glob('*.md')):
-            self.place(src, HOME / 'agents' / src.name)
+        self.retire_agents()
         self.settings()
+        self.settings('settings.local.json')
         personal = HOME / 'personal.md'
         if not personal.exists():
             print('  create  personal.md (edit it: your OS, project paths, extra rules)')
@@ -142,7 +222,7 @@ class Installer:
         self.opencode()
         if self.saved:
             print(f'Backups in {self.backup}')
-        print('Done. Restart Claude Code (agents reload on the next message).')
+        print('Done. Start new agent sessions to reload the rules and settings.')
 
 
 if __name__ == '__main__':

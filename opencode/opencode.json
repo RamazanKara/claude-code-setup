@@ -17,18 +17,5 @@
         "kimi-k3.1-pro": { "limit": { "context": 470000 } }
       }
     }
-  },
-  "agents": {
-    "explore": { "model": "opencode-go/deepseek-v4.1-flash" },
-    "general": { "disabled": true },
-    "title": { "model": "opencode-go/deepseek-v4.1-flash" },
-    "summary": { "model": "opencode-go/deepseek-v4.1-flash" }
-  },
-  "permissions": [
-    { "action": "skill", "resource": "built-in-browser", "effect": "deny" },
-    { "action": "skill", "resource": "chrome-browser", "effect": "deny" },
-    { "action": "skill", "resource": "computer-use", "effect": "deny" },
-    { "action": "skill", "resource": "docs", "effect": "deny" },
-    { "action": "shell", "resource": "*anthropic/claude*", "effect": "deny" }
-  ]
+  }
 }
