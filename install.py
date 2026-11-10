@@ -186,11 +186,16 @@ class Installer:
                 print(f'  remove  {label(dst)}')
 
     def install_agents(self):
-        for harness, directory in (('claude', HOME), ('opencode', OPENCODE)):
+        targets = [('claude', HOME, HOME / 'agents'), ('opencode', OPENCODE, OPENCODE / 'agents')]
+        if 'codex' in SHARED:
+            targets.append(('codex', SHARED['codex'].parent, SHARED['codex'].parent / 'agents'))
+        if 'antigravity' in SHARED:
+            targets.append(('antigravity', SHARED['antigravity'].parent, SHARED['antigravity'].parent / 'config' / 'agents'))
+        for harness, directory, agents in targets:
             if not directory.is_dir():
                 continue
-            for src in sorted((ROOT / harness / 'agents').glob('*.md')):
-                self.place(src, directory / 'agents' / src.name, harness + '-agents')
+            for src in sorted((ROOT / harness / 'agents').glob('*.*')):
+                self.place(src, agents / src.name, harness + '-agents')
 
     def opencode(self):
         if not OPENCODE.is_dir():

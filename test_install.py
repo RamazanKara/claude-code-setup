@@ -52,7 +52,7 @@ class InstallerTests(unittest.TestCase):
             home, opencode = root / 'claude', root / 'opencode'
             home.mkdir()
             opencode.mkdir()
-            shared = {name: root / name / 'AGENTS.md' for name in ('codex', 'other')}
+            shared = {name: root / name / 'AGENTS.md' for name in ('codex', 'antigravity', 'other')}
             for dst in shared.values():
                 dst.parent.mkdir()
             original = {'hooks': {'Stop': ['keep']}, 'permissions': {'deny': ['blocked'], 'allow': ['Read']},
@@ -85,15 +85,18 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((agents / 'old.md').exists())
                 self.assertTrue((first.backup / 'claude-agents/old.md').exists())
                 self.assertTrue((agents / 'custom.md').exists())
-                for harness, directory, names in (
-                    ('claude', home, ('scout', 'runner', 'mechanic')),
-                    ('opencode', opencode, ('runner', 'mechanic')),
+                for harness, directory, suffix in (
+                    ('claude', home / 'agents', '.md'),
+                    ('opencode', opencode / 'agents', '.md'),
+                    ('codex', root / 'codex' / 'agents', '.toml'),
+                    ('antigravity', root / 'antigravity' / 'config' / 'agents', '.md'),
                 ):
-                    for name in names:
-                        dst = directory / 'agents' / (name + '.md')
+                    for name in ('scout', 'runner', 'mechanic'):
+                        dst = directory / (name + suffix)
                         self.assertEqual(dst.read_bytes(),
                                          (install.ROOT / harness / 'agents' / dst.name).read_bytes())
                         self.assertNotIn('effect: deny', dst.read_text(encoding='utf-8'))
+                self.assertFalse((root / 'other' / 'agents').exists())
                 self.assertEqual(install.read_json(home / 'settings.local.json'), {})
                 self.assertNotIn('agents', install.read_json(opencode / 'opencode.jsonc'))
                 self.assertNotIn('permissions', install.read_json(opencode / 'opencode.jsonc'))
