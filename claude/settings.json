@@ -2,8 +2,14 @@
   "bashOutputMaxChars": 12000,
   "effortLevel": "high",
   "modelSettings": {
+    "claude-fable-5-2": {
+      "autoCompactWindow": 400000
+    },
     "claude-opus-5-5": {
       "autoCompactWindow": 400000
+    },
+    "claude-sonnet-5-5": {
+      "autoCompactWindow": 300000
     }
   },
   "autoCompactWindow": 200000
