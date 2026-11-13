@@ -100,6 +100,8 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(install.read_json(home / 'settings.local.json'), {})
                 self.assertNotIn('agents', install.read_json(opencode / 'opencode.jsonc'))
                 self.assertNotIn('permissions', install.read_json(opencode / 'opencode.jsonc'))
+                flash = install.read_json(opencode / 'opencode.jsonc')['providers']['opencode-go']['models']
+                self.assertEqual(flash['deepseek-v4.1-flash']['body'], {'reasoning_effort': 'max'})
                 self.assertEqual(next(iter(shared.values())).read_text(encoding='utf-8'),
                                  install.shared_rules(home / 'personal.md'))
                 second = install.Installer(False)
