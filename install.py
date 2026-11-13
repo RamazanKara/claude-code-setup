@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Install this setup into ~/.claude and the other installed agents.
 
-Copies CLAUDE.md and optional helper agents, and merges settings.json into your existing one,
-and creates ~/.claude/personal.md from the example once. The same rules, with
+Copies CLAUDE.md, optional helper agents and the read-streak hook, merges settings.json into
+your existing one, and creates ~/.claude/personal.md from the example once. The same rules, with
 personal.md inlined, are written for every other installed agent: Codex
 (~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
 (~/.gemini/GEMINI.md). opencode/opencode.json is merged into OpenCode's global
@@ -15,7 +15,7 @@ so the installer ignores that variable when it points into an Orca profile.
   python install.py            # install, or update after `git pull` or editing personal.md
   python install.py --dry-run  # show what would change
 """
-import argparse, datetime, filecmp, hashlib, json, os, re, shutil
+import argparse, datetime, filecmp, hashlib, json, os, re, shutil, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -76,6 +76,15 @@ def clean_claude(config):
             del overrides[skill]
     if not overrides:
         config.pop('skillOverrides', None)
+
+
+def set_hooks(config):
+    """Add this setup's hook to settings, replacing an earlier entry for the same script."""
+    script = HOME / 'hooks' / 'read_streak.py'
+    entry = {'hooks': [{'type': 'command', 'command': Path(sys.executable).as_posix(),
+                        'args': [script.as_posix()], 'timeout': 10}]}
+    groups = config.setdefault('hooks', {}).setdefault('PostToolBatch', [])
+    groups[:] = [g for g in groups if script.name not in json.dumps(g)] + [entry]
 
 
 def clean_opencode(config):
@@ -157,6 +166,7 @@ class Installer:
         new = json.loads(json.dumps(cur))
         if name == 'settings.json':
             merge(new, read_json(REPO / 'settings.json'))
+            set_hooks(new)
         clean_claude(new)
         if new == cur:
             return
@@ -219,6 +229,8 @@ class Installer:
         self.place(REPO / 'CLAUDE.md', HOME / 'CLAUDE.md')
         self.retire_agents()
         self.install_agents()
+        for src in sorted((REPO / 'hooks').glob('*.py')):
+            self.place(src, HOME / 'hooks' / src.name)
         self.settings()
         self.settings('settings.local.json')
         personal = HOME / 'personal.md'
