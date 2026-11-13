@@ -67,7 +67,13 @@ def main():
     streak = streak_after(event, os.path.join(tempfile.gettempdir(), 'claude-read-streak'))
     if streak < first or (streak - first) % REPEAT:
         return
-    where = '`scout`' if event.get('agent_id') else '`scout` or a DeepSeek worker'
+    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'deepseek.py')
+    if not event.get('agent_id'):
+        where = '`scout` or a DeepSeek worker'
+    elif os.path.exists(tool):  # an Orca worker cannot report to a subagent; the installed wrapper can
+        where = '`scout` or `python "' + tool.replace(os.sep, '/') + '" read "<brief>"`'
+    else:
+        where = '`scout`'
     note = (f'{streak} read-only turns in a row with one call each, and every turn re-reads the whole context. '
             f'Put the next independent reads and searches into one turn, or hand a longer survey to {where}.')
     print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolBatch', 'additionalContext': note}}))

@@ -1,6 +1,9 @@
 {
   "bashOutputMaxChars": 12000,
   "effortLevel": "high",
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "opus"
+  },
   "modelSettings": {
     "claude-fable-5-2": {
       "autoCompactWindow": 400000

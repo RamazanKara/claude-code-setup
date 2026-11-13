@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -60,7 +61,7 @@ class InstallerTests(unittest.TestCase):
                 dst.parent.mkdir()
             other = {'hooks': [{'type': 'command', 'command': 'other-hook'}]}
             stale = {'hooks': [{'type': 'command', 'command': 'old-python', 'args': ['old/read_streak.py']}]}
-            original = {'hooks': {'Stop': ['keep'], 'PostToolBatch': [stale, other]},
+            original = {'hooks': {'Stop': ['keep'], 'PostToolBatch': [stale, other]}, 'env': {'KEEP': '1'},
                         'permissions': {'deny': ['blocked'], 'allow': ['Read']},
                         'skillOverrides': {'docs': 'off', 'custom': 'on'}}
             (home / 'settings.json').write_text(json.dumps(original), encoding='utf-8')
@@ -82,6 +83,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((home / 'CLAUDE.md').exists())
                 self.assertFalse((agents / 'scout.md').exists())
                 self.assertFalse((home / 'hooks').exists())
+                self.assertFalse((home / 'tools').exists())
                 first = install.Installer(False)
                 first.run()
                 settings = install.read_json(home / 'settings.json')
@@ -91,6 +93,9 @@ class InstallerTests(unittest.TestCase):
                 batch = settings['hooks']['PostToolBatch']
                 self.assertEqual(batch[0], other)
                 self.assertEqual([g['hooks'][0]['args'] for g in batch[1:]], [[script.as_posix()]])
+                self.assertEqual(settings['env'], {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus'})
+                self.assertEqual((home / 'tools' / 'deepseek.py').read_bytes(),
+                                 (install.REPO / 'tools' / 'deepseek.py').read_bytes())
                 self.assertEqual(settings['permissions'], {'allow': ['Read']})
                 self.assertEqual(settings['skillOverrides'], {'custom': 'on'})
                 self.assertEqual(install.read_json(first.backup / 'settings.json'), original)
@@ -120,6 +125,15 @@ class InstallerTests(unittest.TestCase):
                 second.run()
                 self.assertFalse(second.saved)
                 self.assertFalse(second.backup.exists())
+
+    def test_the_deepseek_tool_needs_opencode(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            home = Path(tmp) / 'claude'
+            home.mkdir()
+            with patch.multiple(install, HOME=home, OPENCODE=Path(tmp) / 'none', SHARED={}, RETIRED_AGENTS={}):
+                install.Installer(False).run()
+            self.assertTrue((home / 'hooks' / 'read_streak.py').exists())
+            self.assertFalse((home / 'tools').exists())
 
 
 class ReadStreakHookTests(unittest.TestCase):
@@ -172,7 +186,8 @@ class ReadStreakHookTests(unittest.TestCase):
             self.assertIsNone(self.turn(('Read', ''), agent_id='a2', agent_type='scout'))
         note = self.turn(('Read', ''), agent_id='a1', agent_type='general-purpose')
         self.assertIn('`scout`', note)
-        self.assertNotIn('DeepSeek', note)
+        self.assertNotIn('DeepSeek worker', note)
+        self.assertIn('/tools/deepseek.py" read', note)
 
     def test_zero_turns_it_off_and_bad_input_stays_silent(self):
         self.env['CLAUDE_READ_STREAK'] = '0'
@@ -180,6 +195,74 @@ class ReadStreakHookTests(unittest.TestCase):
         done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'read_streak.py')], input='not json',
                               capture_output=True, text=True, env=self.env)
         self.assertEqual((done.returncode, done.stdout), (0, ''))
+
+
+FAKE_OPENCODE = '''
+import json, sys, time
+brief = sys.stdin.read().strip()
+def say(kind, **part):
+    print(json.dumps({'type': kind, 'part': part}), flush=True)
+if 'say nothing' in brief:
+    sys.exit(0)
+say('step_start')
+say('text', text='looking')
+say('tool_use', tool='read')
+if 'fail' in brief:
+    print(json.dumps({'type': 'error', 'error': {'message': 'quota reached'}}), flush=True)
+    sys.exit(0)
+say('step_start')
+say('text', text='report: ' + brief.splitlines()[0][:24] + ' | ' + ' '.join(sys.argv[1:4]) + ' | ' + brief.splitlines()[-1])
+if 'sleep' in brief:
+    time.sleep(60)
+'''
+
+
+class DeepSeekToolTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.bin = Path(tmp.name)
+        fake = self.bin / 'fake.py'
+        fake.write_text(FAKE_OPENCODE, encoding='utf-8')
+        if os.name == 'nt':  # a shim with a child process, as npm installs it
+            (self.bin / 'opencode.cmd').write_text(f'@"{sys.executable}" "{fake}" %*\n', encoding='utf-8')
+        else:
+            shim = self.bin / 'opencode'
+            shim.write_text(f'#!/bin/sh\n"{sys.executable}" "{fake}" "$@"\n', encoding='utf-8')
+            shim.chmod(0o755)
+        self.env = {**os.environ, 'PATH': str(self.bin)}
+
+    def tool(self, *args, **kw):
+        return subprocess.run([sys.executable, str(install.REPO / 'tools' / 'deepseek.py'), *args],
+                              capture_output=True, text=True, env=self.env, **kw)
+
+    def test_prints_only_the_last_report_and_sends_the_mode_and_model(self):
+        done = self.tool('read', 'find the thing')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(),
+                         'report: This is a read-only task | run -m opencode-go/deepseek-v4.1-flash | find the thing')
+        done = self.tool('write', '-', input='make "a b" & c\n')
+        self.assertEqual(done.stdout.strip(),
+                         'report: This is a scaffolding ta | run -m opencode-go/deepseek-v4.1-flash | make "a b" & c')
+
+    def test_a_timeout_ends_the_run_and_keeps_what_was_said(self):
+        start = time.monotonic()
+        done = self.tool('read', 'sleep', '--timeout', '5')
+        self.assertEqual(done.returncode, 124)
+        self.assertIn('timed out after 5 s', done.stderr)
+        self.assertIn('report: ', done.stdout)
+        self.assertLess(time.monotonic() - start, 30)
+
+    def test_fails_on_an_error_no_report_an_empty_brief_or_no_opencode(self):
+        failed = self.tool('read', 'fail')
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn('quota reached', failed.stderr)
+        silent = self.tool('read', 'say nothing')
+        self.assertEqual((silent.returncode, silent.stdout), (1, ''))
+        self.assertIn('no report came back', silent.stderr)
+        self.assertEqual(self.tool('read', ' ').returncode, 1)
+        self.env['PATH'] = str(self.bin / 'none')
+        self.assertIn('opencode is not on PATH', self.tool('read', 'x').stderr)
 
 
 if __name__ == '__main__':

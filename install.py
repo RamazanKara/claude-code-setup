@@ -231,6 +231,9 @@ class Installer:
         self.install_agents()
         for src in sorted((REPO / 'hooks').glob('*.py')):
             self.place(src, HOME / 'hooks' / src.name)
+        if OPENCODE.is_dir():  # the tools hand work to OpenCode
+            for src in sorted((REPO / 'tools').glob('*.py')):
+                self.place(src, HOME / 'tools' / src.name)
         self.settings()
         self.settings('settings.local.json')
         personal = HOME / 'personal.md'
