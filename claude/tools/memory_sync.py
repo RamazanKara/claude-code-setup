@@ -350,7 +350,7 @@ def one_run(state):
             os.remove(lock)
 
 
-def sync(cfg, name, dry=False, mine=(), theirs=()):
+def sync(cfg, name, dry=False, mine=(), theirs=(), meant=False):
     """Sync one pair and say what happened. Returns whether both machines are in step now."""
     pair = dict(cfg['pairs'][name])
     host = cfg['hosts'].get(pair.get('host'))
@@ -373,13 +373,14 @@ def sync(cfg, name, dry=False, mine=(), theirs=()):
             write(os.path.join(state, 'base'), n, data)
         base = {n: d for n, d in stored.items() if n.endswith('.md')}
         was = [stored.get(INDEX + end, base.get(INDEX, b'')) for end in ('.here', '.there')]  # each machine's index after the last run
-        for where, found, before in ((('this machine', local, was[0]), (pair['host'], remote, was[1]))):
-            meant = f'; if that is meant, delete {os.path.join(state, "base")} and run again as for the first time'
+        # The record of the last run stays either way: without it the files deleted here would count as new there and come back.
+        way = f'; if that is meant, run it once more with --meant: the deleted files are then named and stay where they still are'
+        for where, found, before in ((('this machine', local, was[0]), (pair['host'], remote, was[1]))) if not meant else ():
             if len(base) >= 4 and len(found) < len(base) / 2:  # a wrong path or an emptied folder, not an edit
-                raise Stop(f'{where} has {len(found)} memory files where the last run left {len(base)}' + meant)
+                raise Stop(f'{where} has {len(found)} memory files where the last run left {len(base)}' + way)
             had, has = len(pointers(before)), len(pointers(found.get(INDEX, before)))
             if had >= 4 and has < had / 2 or had and not has:
-                raise Stop(f'{INDEX} on {where} has {has} pointers where the last run left {had}' + meant)
+                raise Stop(f'{INDEX} on {where} has {has} pointers where the last run left {had}' + way)
         unknown = sorted({*mine, *theirs} - {*local, *remote, *base})
         if unknown:
             raise Stop(f'no such memory file on either machine: {", ".join(unknown)}')
@@ -487,18 +488,19 @@ def main():
     ap.add_argument('--dry', action='store_true', help='say what a run would do; write nothing')
     ap.add_argument('--mine', nargs='+', default=[], metavar='FILE')
     ap.add_argument('--theirs', nargs='+', default=[], metavar='FILE')
+    ap.add_argument('--meant', action='store_true', help='a machine lost most of its files or pointers on purpose: sync all the same')
     args = ap.parse_args()
     cfg = settings()
     names = args.names or sorted(cfg['pairs'])
     missing = [name for name in names if name not in cfg['pairs']]
-    if missing or not names or (args.mine or args.theirs) and len(names) != 1 or set(args.mine) & set(args.theirs):
+    if missing or not names or (args.mine or args.theirs or args.meant) and len(names) != 1 or set(args.mine) & set(args.theirs):
         print('memory_sync.py: ' + (f'machine.json names no memory pair "{missing[0]}"' if missing else 'machine.json names no memory pairs under "memory"' if not names
-                                    else 'a file is either --mine or --theirs' if set(args.mine) & set(args.theirs) else '--mine and --theirs need the one pair they are about'), file=sys.stderr)
+                                    else 'a file is either --mine or --theirs' if set(args.mine) & set(args.theirs) else '--mine, --theirs and --meant need the one pair they are about'), file=sys.stderr)
         sys.exit(2)
     worst = 0
     for name in names:
         try:
-            worst = max(worst, 0 if sync(cfg, name, args.dry, set(args.mine), set(args.theirs)) else 1)
+            worst = max(worst, 0 if sync(cfg, name, args.dry, set(args.mine), set(args.theirs), args.meant) else 1)
         except (Stop, OSError) as why:
             print(f'{name}: not synced: {why}', file=sys.stderr)
             worst = 2

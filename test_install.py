@@ -966,6 +966,10 @@ else:
 """
 
 
+def pointers_in(text):
+    return [line for line in text.splitlines() if line.startswith('- [')]
+
+
 class MemorySyncTests(unittest.TestCase):
     ROWS = ['- one\n', '- two\n', '- three\n', '- four\n', '- five\n', '- six\n', '- seven\n']
 
@@ -1259,7 +1263,29 @@ class MemorySyncTests(unittest.TestCase):
         self.assertEqual(self.read(self.there, 'MEMORY.md'), self.read(self.here, 'MEMORY.md'))
         self.assertEqual(self.names(self.root / 'there'), ['memory'])
         self.put('MEMORY.md', '', self.there)  # an emptied index stops the run, however few pointers it had
-        self.assertIn('delete', self.tool('proj', code=2))
+        self.assertIn('--meant', self.tool('proj', code=2))
+
+    def test_most_memories_forgotten_on_purpose_stay_forgotten(self):
+        names = [f'{letter}.md' for letter in 'abcdef']
+        for name in names:
+            self.put(name, self.memo('kept\n'))
+        self.put('MEMORY.md', ''.join('- [N](%s) \u2014 x\n' % name for name in names))
+        self.tool('proj')
+        for name in names[2:]:
+            (self.here / name).unlink()
+        self.put('MEMORY.md', ''.join('- [N](%s) \u2014 x\n' % name for name in names[:2]), self.here)
+        self.assertIn('--meant', self.tool('proj', code=2))
+        said = self.tool('proj', '--meant', code=1)
+        self.assertIn('c.md was deleted here and is still on the other machine', said)
+        self.assertEqual(self.names(self.here), ['MEMORY.md', 'a.md', 'b.md'])  # nothing came back
+        self.assertEqual(len(pointers_in(self.read(self.here, 'MEMORY.md'))), 2)
+        self.assertEqual(self.names(self.there), ['MEMORY.md', *names])  # and nothing was deleted there
+        self.assertEqual(len(pointers_in(self.read(self.there, 'MEMORY.md'))), 6)
+        for name in names[2:]:  # deleted there too: the two are in step again, with no flag
+            (self.there / name).unlink()
+        self.put('MEMORY.md', self.read(self.here, 'MEMORY.md'), self.there)
+        self.tool('proj', '--meant')
+        self.assertIn('in step', self.tool('proj'))
 
 
 if __name__ == '__main__':
