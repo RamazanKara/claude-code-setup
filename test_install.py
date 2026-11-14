@@ -113,7 +113,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['SubagentStop']],
                                  [('reviewer', [gate, 'reviewed'])])
                 self.assertTrue((agents / 'reviewer.md').exists())
-                for tool in ('deepseek.py', 'task.py'):
+                for tool in ('deepseek.py', 'memory_sync.py', 'task.py'):
                     self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
                 self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SessionStart']],
                                  [[(home / 'tools' / 'task.py').as_posix(), 'daily']])
@@ -155,7 +155,7 @@ class InstallerTests(unittest.TestCase):
             with patch.multiple(install, HOME=home, OPENCODE=Path(tmp) / 'none', SHARED={}, RETIRED_AGENTS={}):
                 install.Installer(False).run()
             self.assertTrue((home / 'hooks' / 'read_streak.py').exists())
-            self.assertEqual([tool.name for tool in (home / 'tools').iterdir()], ['task.py'])
+            self.assertEqual(sorted(tool.name for tool in (home / 'tools').iterdir()), ['memory_sync.py', 'task.py'])
 
 
 class ReadStreakHookTests(unittest.TestCase):
@@ -926,6 +926,221 @@ class TaskToolTests(unittest.TestCase):
         broken = self.tool('daily')
         self.assertEqual((broken.returncode, broken.stdout, broken.stderr), (0, '', ''))
         self.refused('cannot read', 'sweep')
+
+
+FAKE_REMOTE = """import json, os, shutil, subprocess, sys
+mode, log, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+with open(log, 'a', encoding='utf-8') as f:
+    f.write(json.dumps([mode, *args]) + '\\n')
+rest, flags, at = [], [], 0
+while at < len(args):
+    if args[at] == '-o':
+        at += 1
+    elif mode == 'scp' and args[at] in ('-r', '-p', '-q'):
+        flags.append(args[at])
+    else:
+        rest.append(args[at])
+    at += 1
+if any(arg.startswith('broken') for arg in rest):
+    sys.exit('ssh: connect to host broken: timed out')
+if mode == 'ssh':  # the other machine is this one: run what it was asked to
+    sys.exit(subprocess.run(rest[1], shell=True).returncode)
+paths = [arg[len('me@box:'):] if arg.startswith('me@box:') else arg for arg in rest]
+if '-r' in flags:
+    late = log + '.late.json'
+    if os.path.basename(paths[1]) == 'again' and os.path.exists(late):  # an edit on the other machine while the sync runs
+        for name, text in json.load(open(late, encoding='utf-8')).items():
+            open(os.path.join(paths[0], name), 'w', encoding='utf-8', newline='').write(text)
+        os.remove(late)
+    shutil.copytree(paths[0], paths[1])
+else:
+    for source in paths[:-1]:
+        shutil.copy(source, paths[-1])
+"""
+
+
+class MemorySyncTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.here, self.there, self.state, self.log = self.root / 'here' / 'memory', self.root / 'there' / 'memory', self.root / 'state', self.root / 'calls.log'
+        self.here.mkdir(parents=True)
+        self.there.mkdir(parents=True)
+        (self.root / 'fake.py').write_text(FAKE_REMOTE, encoding='utf-8')
+        fake = [sys.executable, str(self.root / 'fake.py')]
+        machine = {'artifacts': str(self.root / 'artifacts'), 'ssh': [*fake, 'ssh', str(self.log)], 'scp': [*fake, 'scp', str(self.log)],
+                   'hosts': {'box': {'ssh': 'me@box', 'shell': 'powershell' if os.name == 'nt' else 'sh'}, 'off': {'ssh': 'broken', 'shell': 'sh'}},
+                   'memory': {'proj': {'local': str(self.here), 'host': 'box', 'remote': self.there.as_posix(), 'exclude': ['own.md']},
+                              'away': {'local': str(self.here), 'host': 'off', 'remote': '/data/memory'}}}
+        (self.root / 'machine.json').write_text(json.dumps(machine), encoding='utf-8')
+        self.env = {**os.environ, 'CLAUDE_MACHINE_FILE': str(self.root / 'machine.json'), 'CLAUDE_MEMORY_SYNC_DIR': str(self.state)}
+
+    def tool(self, *args, code=0):
+        done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'memory_sync.py'), *map(str, args)], capture_output=True, text=True, env=self.env)
+        self.assertEqual(done.returncode, code, done.stdout + done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
+        return done.stdout + done.stderr
+
+    @staticmethod
+    def memo(body, saved='2026-01-01T00:00:00.000Z', by='s1'):
+        return f'---\nname: note\ndescription: a note\nmetadata:\n  type: feedback\n  originSessionId: {by}\n  modified: {saved}\n---\n\n{body}'
+
+    def put(self, name, text, *sides):
+        for side in sides or (self.here, self.there):
+            (side / name).write_text(text, encoding='utf-8', newline='')
+
+    def read(self, side, name):
+        return (side / name).read_text(encoding='utf-8')
+
+    def names(self, side):
+        return sorted(p.name for p in side.iterdir())
+
+    def test_the_first_run_copies_what_one_machine_lacks_and_names_what_differs(self):
+        self.put('a.md', self.memo('same on both\n'))
+        self.put('only-here.md', self.memo('from here\n'), self.here)
+        self.put('only-there.md', self.memo('from there\n'), self.there)
+        self.put('differ.md', self.memo('one version\n'), self.here)
+        self.put('differ.md', self.memo('another version\n'), self.there)
+        self.put('own.md', 'this machine\n', self.here)
+        self.put('own.md', 'that machine\n', self.there)
+        self.put('MEMORY.md', '- [A](a.md) — a\n- [Here](only-here.md) — h\n- [Own](own.md) — o\n', self.here)
+        self.put('MEMORY.md', '- [A](a.md) — a\n- [There](only-there.md) — t\n- [Own](own.md) — o\n', self.there)
+        os.utime(self.here / 'MEMORY.md', (time.time() + 60,) * 2)  # the newer one gives the order
+        said = self.tool('proj', '--dry', code=1)
+        self.assertIn('dry run: nothing written', said)
+        self.assertEqual((self.names(self.there), self.state.joinpath('proj', 'base').exists(), self.state.joinpath('proj', 'backup').exists()),
+                         (['MEMORY.md', 'a.md', 'differ.md', 'only-there.md', 'own.md'], False, False))
+        said = self.tool('proj', code=1)
+        self.assertIn('needs a hand: differ.md differs and was never synced', said)
+        self.assertEqual(self.names(self.here), self.names(self.there))
+        self.assertEqual(self.names(self.here), ['MEMORY.md', 'a.md', 'differ.md', 'only-here.md', 'only-there.md', 'own.md'])
+        self.assertEqual((self.read(self.here, 'differ.md'), self.read(self.there, 'differ.md')), (self.memo('one version\n'), self.memo('another version\n')))
+        self.assertEqual(self.state.joinpath('proj', 'theirs', 'differ.md').read_text(encoding='utf-8'), self.memo('another version\n'))
+        self.assertEqual((self.read(self.here, 'own.md'), self.read(self.there, 'own.md')), ('this machine\n', 'that machine\n'))  # excluded: each its own
+        self.assertEqual(self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md'))
+        self.assertEqual(self.read(self.here, 'MEMORY.md'), '- [A](a.md) — a\n- [There](only-there.md) — t\n- [Here](only-here.md) — h\n- [Own](own.md) — o\n')
+        self.assertEqual(len(list(self.state.joinpath('proj', 'backup').iterdir())), 1)
+        self.assertFalse((self.root / 'there' / 'memory.incoming').exists())
+        self.assertIn('to this machine: differ.md', self.tool('proj', '--theirs', 'differ.md'))
+        self.assertEqual(self.read(self.here, 'differ.md'), self.memo('another version\n'))
+        self.assertIn('in step', self.tool(code=2))  # every pair: this one in step, the other one's machine away
+        self.assertFalse(self.state.joinpath('proj', 'theirs').exists())
+
+    def test_an_edit_on_one_machine_goes_to_the_other_and_a_save_alone_is_no_edit(self):
+        for name in ('a.md', 'b.md', 'c.md'):
+            self.put(name, self.memo('first\n'))
+        self.tool('proj')
+        self.put('a.md', self.memo('edited here\n', '2026-02-01T00:00:00.000Z', 's2'), self.here)
+        self.put('b.md', self.memo('edited there\n', '2026-02-02T00:00:00.000Z', 's3'), self.there)
+        self.put('c.md', self.memo('first\n', '2026-02-03T00:00:00.000Z', 's4'), self.there)  # saved again, nothing changed
+        said = self.tool('proj')
+        self.assertIn('to box: a.md\n', said)
+        self.assertIn('to this machine: b.md\n', said)
+        self.assertEqual(self.read(self.there, 'a.md'), self.memo('edited here\n', '2026-02-01T00:00:00.000Z', 's2'))
+        self.assertEqual(self.read(self.here, 'b.md'), self.memo('edited there\n', '2026-02-02T00:00:00.000Z', 's3'))
+        self.assertEqual(self.read(self.here, 'c.md'), self.memo('first\n'))
+        self.assertIn('in step', self.tool('proj'))
+
+    def test_edits_on_both_machines_merge_when_they_lie_apart_and_stay_when_they_do_not(self):
+        rows = ['- one\n', '- two\n', '- three\n', '- four\n', '- five\n', '- six\n', '- seven\n']
+        self.put('m.md', self.memo(''.join(rows)))
+        self.tool('proj')
+        self.put('m.md', self.memo(''.join(['- ONE\n'] + rows[1:]), '2026-02-01T00:00:00.000Z', 's2'), self.here)
+        self.put('m.md', self.memo(''.join(rows[:6] + ['- SEVEN\n']), '2026-02-02T00:00:00.000Z', 's3'), self.there)
+        self.assertIn('merged on both: m.md', self.tool('proj'))
+        both = self.memo(''.join(['- ONE\n'] + rows[1:6] + ['- SEVEN\n']), '2026-02-02T00:00:00.000Z', 's3')  # the later save's who and when
+        self.assertEqual((self.read(self.here, 'm.md'), self.read(self.there, 'm.md')), (both, both))
+        mine, theirs = both.replace('- two', '- two, here'), both.replace('- two', '- two, there')
+        self.put('m.md', mine, self.here)
+        self.put('m.md', theirs, self.there)
+        said = self.tool('proj', code=1)
+        self.assertIn('needs a hand: m.md was changed on both machines in the same lines', said)
+        self.assertEqual((self.read(self.here, 'm.md'), self.read(self.there, 'm.md')), (mine, theirs))  # no merge markers, nothing lost
+        self.assertEqual(self.state.joinpath('proj', 'theirs', 'm.md').read_text(encoding='utf-8'), theirs)
+        self.put('m.md', both.replace('- two', '- two, here and there'), self.here)
+        self.assertIn('to box: m.md', self.tool('proj', '--mine', 'm.md'))
+        self.assertEqual(self.read(self.there, 'm.md'), both.replace('- two', '- two, here and there'))
+        self.tool('proj', '--mine', 'nothing.md', code=2)
+        self.tool('proj', '--mine', 'm.md', '--theirs', 'm.md', code=2)
+        self.tool('--mine', 'm.md', code=2)  # two pairs: which one?
+
+    def test_a_deleted_file_is_neither_copied_back_nor_deleted_on_the_other_machine(self):
+        for name in ('a.md', 'b.md', 'wrong.md'):
+            self.put(name, self.memo(name + '\n'))
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n- [Wrong](wrong.md) — w\n')
+        self.tool('proj')
+        (self.here / 'wrong.md').unlink()  # dropped here, with its pointer
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n', self.here)
+        (self.there / 'b.md').unlink()  # dropped there, the pointer forgotten
+        for run in range(2):
+            said = self.tool('proj', code=1)
+            self.assertIn('wrong.md was deleted here and is still on the other machine', said)
+            self.assertIn('b.md was deleted on the other machine and is still here', said)
+            self.assertEqual((self.names(self.here), self.names(self.there)), (['MEMORY.md', 'a.md', 'b.md'], ['MEMORY.md', 'a.md', 'wrong.md']))
+            self.assertEqual(self.read(self.here, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n')
+            self.assertEqual(self.read(self.there, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n')  # no pointer to a file that machine lacks
+        (self.there / 'wrong.md').unlink()  # by hand, as the report asks
+        self.assertIn('to box: MEMORY.md, b.md', self.tool('proj', '--mine', 'b.md'))  # with its pointer
+        self.assertIn('in step', self.tool('proj'))
+        self.assertEqual(self.read(self.there, 'MEMORY.md'), self.read(self.here, 'MEMORY.md'))
+        (self.there / 'MEMORY.md').unlink()
+        self.assertIn('MEMORY.md was deleted on one machine', self.tool('proj', code=1))
+        self.assertEqual(self.read(self.here, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n')
+
+    def test_the_index_is_merged_by_the_file_a_line_points_to(self):
+        for name in ('a.md', 'b.md', 'c.md'):
+            self.put(name, self.memo(name + '\n'))
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) — one\n- [B](b.md) — two\n\nState\n- [C](c.md) — three\n')
+        self.tool('proj')
+        self.put('d.md', self.memo('d\n'), self.here)
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) — one, said better\n- [B](b.md) — two\n- [D](d.md) — four\n\nState\n- [C](c.md) — three\n', self.here)
+        self.put('e.md', self.memo('e\n'), self.there)
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) — one\n- [B](b.md) — two, said better\n\nState\n- [C](c.md) — three\n- [E](e.md) — five\n', self.there)
+        self.tool('proj')
+        whole = 'Rules\n- [A](a.md) — one, said better\n- [B](b.md) — two, said better\n- [D](d.md) — four\n\nState\n- [C](c.md) — three\n- [E](e.md) — five\n'
+        self.assertEqual((self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md')), (whole, whole))
+        self.assertEqual(self.names(self.here), self.names(self.there))
+        self.put('MEMORY.md', whole.replace('State\n', 'Project state\n'), self.there)  # a heading follows the machine that changed it
+        self.put('MEMORY.md', whole.replace('- [B](b.md) — two, said better\n', ''), self.here)
+        self.tool('proj')
+        self.assertEqual(self.read(self.here, 'MEMORY.md'), whole.replace('State\n', 'Project state\n').replace('- [B](b.md) — two, said better\n', ''))
+        self.assertEqual(self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md'))
+
+    def test_it_stops_and_writes_nothing_when_the_other_machine_is_away_or_a_folder_looks_emptied(self):
+        for name in 'abcdef':
+            self.put(name + '.md', self.memo(name + '\n'))
+        self.assertIn('not synced', self.tool('away', code=2))
+        self.assertFalse(self.state.joinpath('away', 'base').exists())
+        self.assertIn('names no memory pair "nowhere"', self.tool('nowhere', code=2))
+        self.tool('proj')
+        self.put('a.md', self.memo('edited\n'), self.here)
+        kept = self.root / 'kept'
+        kept.mkdir()
+        for name in 'bcdef':
+            os.rename(self.there / (name + '.md'), kept / (name + '.md'))
+        self.assertIn('box has 1 memory files where the last run left 6', self.tool('proj', code=2))
+        self.assertEqual((self.names(self.here), self.read(self.there, 'a.md')), ([n + '.md' for n in 'abcdef'], self.memo('a\n')))
+        self.assertEqual(self.tool('proj', 'away', code=2).count('not synced'), 2)
+        (self.state / 'proj' / 'lock').write_text('', encoding='utf-8')
+        self.assertIn('another sync of it is running', self.tool('proj', code=2))
+
+    def test_a_file_changed_while_it_runs_waits_for_the_next_run(self):
+        rows = ['- one\n', '- two\n', '- three\n', '- four\n', '- five\n', '- six\n', '- seven\n']
+        self.put('m.md', self.memo(''.join(rows)))
+        self.put('n.md', self.memo('n\n'))
+        self.tool('proj')
+        self.put('m.md', self.memo(''.join(['- ONE\n'] + rows[1:]), '2026-02-01T00:00:00.000Z'), self.here)
+        self.put('n.md', self.memo('n, edited\n', '2026-02-01T00:00:00.000Z'), self.here)
+        late = self.memo(''.join(rows[:6] + ['- SEVEN\n']), '2026-02-02T00:00:00.000Z')
+        Path(str(self.log) + '.late.json').write_text(json.dumps({'m.md': late}), encoding='utf-8')
+        said = self.tool('proj')
+        self.assertIn('changed while this ran, left for the next run: m.md', said)
+        self.assertIn('to box: n.md', said)
+        self.assertEqual((self.read(self.there, 'm.md'), self.read(self.there, 'n.md')), (late, self.memo('n, edited\n', '2026-02-01T00:00:00.000Z')))
+        self.assertIn('merged on both: m.md', self.tool('proj'))
+        self.assertEqual(self.read(self.here, 'm.md'), self.memo(''.join(['- ONE\n'] + rows[1:6] + ['- SEVEN\n']), '2026-02-02T00:00:00.000Z'))
+        self.assertEqual(self.read(self.here, 'm.md'), self.read(self.there, 'm.md'))
 
 
 if __name__ == '__main__':
