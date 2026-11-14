@@ -175,13 +175,12 @@ def held(cfg, name):
                 f.write(f'{os.getpid()} {me[0]}' if isinstance(me, tuple) else '0 0')  # a system that cannot say: by age
             break
         except FileExistsError:
+            if time.time() > deadline:  # also when an abandoned lock cannot be removed
+                fail(f'another task.py is working on {name}, or {lock} cannot be removed; try again when it is done')
             if abandoned(lock):
                 with contextlib.suppress(OSError):
                     os.remove(lock)
-            elif time.time() > deadline:
-                fail(f'another task.py is working on {name} ({lock}); try again when it is done')
-            else:
-                time.sleep(0.1)
+            time.sleep(0.1)
         except OSError as error:
             fail(f'cannot write in {cfg["artifacts"]}: {error}')
     try:

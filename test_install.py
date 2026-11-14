@@ -806,6 +806,10 @@ class TaskToolTests(unittest.TestCase):
         (self.artifacts / '.lock-fix-a').write_text(f'{gone.pid} {me[0]}', encoding='utf-8')
         self.assertEqual(self.tool('open', 'fix-a').returncode, 0)
         self.assertFalse((self.artifacts / '.lock-fix-a').exists())
+        if os.name != 'nt':  # an abandoned lock that cannot be removed ends the wait by name, not in a loop
+            (self.artifacts / '.lock-fix-a').mkdir()
+            os.utime(self.artifacts / '.lock-fix-a', (time.time() - 1000,) * 2)
+            self.refused('cannot be removed', 'close', 'fix-a')
 
     def test_a_process_is_ended_only_if_it_is_the_one_recorded(self):
         self.tool('open', 'fix-a')
