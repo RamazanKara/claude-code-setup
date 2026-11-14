@@ -2,6 +2,7 @@ import base64
 import contextlib
 import datetime
 import hashlib
+import importlib.util
 import io
 import json
 import shutil
@@ -653,11 +654,11 @@ class TaskToolTests(unittest.TestCase):
                      self.temp / 'fix-a' / 'deep', self.artifacts / 'other'):
             path.mkdir(parents=True)
         self.link(own / 'link', self.root / 'elsewhere')
-        for path, why in ((self.root / 'elsewhere', 'outside the temp folder and the roots'), (self.tests, 'outside the temp folder and the roots'),
+        for path, why in ((self.root / 'elsewhere', 'outside the temp folder and the roots'), (self.tests, 'is, or holds'), (self.root, 'is, or holds'),
                           (self.tests / 'paired', 'keep list'), (self.tests / 'paired' / 'certs', 'keep list'),
                           (self.tests / 'repo', 'holds a checkout'), (own / 'build', 'holds a checkout'), (own, 'holds a checkout'),
                           (own / 'link', 'it is a link'), (self.artifacts / 'other', 'belong to their own tasks'),
-                          (self.artifacts, 'belong to their own tasks'), (self.tests / 'missing', 'is no folder')):
+                          (self.artifacts, 'is, or holds'), (self.temp, 'is, or holds'), (self.tests / 'missing', 'is no folder')):
             self.refused(why, 'add', 'fix-a', 'dir', path)
         if self.BIRTH:
             self.ledger('fix-a', opened=opened + 60)  # as if these had been there before the task
@@ -734,6 +735,77 @@ class TaskToolTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.artifacts.iterdir()), ['.closed', 'reference'])
         self.assertTrue((self.tests / 'paired' / 'certs').is_dir())  # the link went, what it pointed to stays
         self.assertTrue(marker.exists())
+
+    def test_a_task_named_like_a_shared_folder_cannot_delete_it(self):
+        disk = self.root / 'disk'  # a root in a root, and the artifact folder in a folder of that root
+        self.artifacts = disk / 'claude' / 'artifacts'
+        self.configure(artifacts=str(self.artifacts), roots=[str(disk), str(disk / 'tests')], keep=[],
+                       hosts={'nuc': {'ssh': 'nuc', 'shell': 'sh', 'roots': ['/mnt/hdd2', '/mnt/hdd2/tests/']}})
+        for name in ('claude', 'tests', 'disk'):
+            self.assertEqual(self.tool('open', name).returncode, 0)
+        for path in (disk / 'tests' / 'paired', disk / 'tests' / 'tests' / 'out', disk / 'tests' / 'other'):
+            path.mkdir(parents=True)  # all made after the tasks were opened
+        for name, path in (('claude', disk / 'claude'), ('tests', disk / 'tests'), ('disk', disk), ('tests', disk)):
+            self.refused('is, or holds', 'add', name, 'dir', path)
+        if not self.BIRTH:  # by name, and the name counts below the nearest root
+            self.refused('keeps no creation time', 'add', 'tests', 'dir', disk / 'tests' / 'other')
+        self.assertEqual(self.tool('add', 'tests', 'dir', disk / 'tests' / 'tests').returncode, 0)
+        for path, why in (('/mnt/hdd2/tests', 'not below the roots'), ('/mnt/hdd2/tests/', 'not below the roots'), ('/mnt', 'not below the roots'),
+                          ('/mnt/hdd2/tests/other', 'must be <root>/tests'), ('/mnt/hdd2/tests/paired/tests', 'must be <root>/tests')):
+            self.refused(why, 'add', 'tests', 'remote', 'nuc', path)
+        self.assertEqual(self.tool('add', 'tests', 'remote', 'nuc', '/mnt/hdd2/tests/tests/out').returncode, 0)
+        self.ledger('tests', entries=self.ledger('tests')['entries'] + [
+            {'type': 'dir', 'path': str(disk / 'tests')}, {'type': 'dir', 'path': str(disk / 'claude')},
+            {'type': 'remote', 'host': 'nuc', 'path': '/mnt/hdd2/tests'}])
+        done = self.tool('close', 'tests')
+        self.assertEqual((done.returncode, done.stdout.count('LEFT'), done.stdout.count('ok  ')), (1, 3, 2), done.stdout + done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
+        self.assertEqual(sorted(p.name for p in (disk / 'tests').iterdir()), ['other', 'paired'])
+        self.assertEqual(sorted(p.name for p in self.artifacts.iterdir()), ['claude', 'disk', 'tests'])
+        calls = [json.loads(line)[5] for line in (self.root / 'ssh.log').read_text(encoding='utf-8').splitlines()]
+        self.assertEqual(calls, ["rm -rf -- /mnt/hdd2/tests/tests/out"])
+
+    def test_a_link_in_the_artifact_folder_is_no_task_folder(self):
+        elsewhere = self.root / 'elsewhere'
+        elsewhere.mkdir()
+        self.tool('open', 'fix-a')
+        shutil.copy(self.artifacts / 'fix-a' / 'task.json', elsewhere / 'task.json')
+        (elsewhere / 'data.bin').write_text('x', encoding='utf-8')
+        for name in ('linked', '.closing-fix-c'):
+            self.link(self.artifacts / name, elsewhere)
+        self.refused('is a link to another place', 'close', 'linked')
+        self.refused('is a link to another place', 'close', 'fix-c')
+        self.refused('is a link to another place', 'add', 'linked', 'command', 'x')
+        self.refused('was not opened by this tool', 'open', 'linked')
+        self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ['data.bin', 'task.json'])
+        self.assertEqual(json.loads((elsewhere / 'task.json').read_text(encoding='utf-8'))['entries'], [])
+
+    def test_a_close_that_stopped_at_the_emptied_folder_is_finished_by_the_next(self):
+        (self.artifacts / '.closing-fix-b').mkdir()  # task.json went, the folder could not
+        self.refused('did not finish', 'open', 'fix-b')
+        done = self.tool('close', 'fix-b')
+        self.assertEqual((done.returncode, done.stderr), (0, ''))
+        self.assertEqual(self.tool('open', 'fix-b').returncode, 0)
+        (self.artifacts / '.closing-fix-d' / 'mine').mkdir(parents=True)  # not left by a close: it stays
+        self.refused('could not be deleted', 'close', 'fix-d')
+        self.assertTrue((self.artifacts / '.closing-fix-d' / 'mine').is_dir())
+
+    def test_a_lock_is_given_up_only_when_its_owner_is_gone(self):
+        spec = importlib.util.spec_from_file_location('task_tool', install.REPO / 'tools' / 'task.py')
+        task = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(task)
+        lock, me = self.root / 'lock', task.process(os.getpid())
+        gone = subprocess.Popen([sys.executable, '-c', 'pass'])
+        gone.wait()
+        for text, age, given_up in ((f'{os.getpid()} {me[0]}', 5000, False),      # its owner runs, however long it takes
+                                    (f'{os.getpid()} {me[0] - 60}', 0, True),     # the number went to another process
+                                    (f'{gone.pid} {me[0]}', 0, True), ('', 0, False), ('0 0', 0, False), ('0 0', 1000, True), ('x', 1000, True)):
+            lock.write_text(text, encoding='utf-8')
+            os.utime(lock, (time.time() - age,) * 2)
+            self.assertEqual(task.abandoned(str(lock)), given_up, text)
+        (self.artifacts / '.lock-fix-a').write_text(f'{gone.pid} {me[0]}', encoding='utf-8')
+        self.assertEqual(self.tool('open', 'fix-a').returncode, 0)
+        self.assertFalse((self.artifacts / '.lock-fix-a').exists())
 
     def test_a_process_is_ended_only_if_it_is_the_one_recorded(self):
         self.tool('open', 'fix-a')

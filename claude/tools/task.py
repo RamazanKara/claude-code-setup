@@ -19,12 +19,13 @@
    "ssh": "C:/Windows/System32/OpenSSH/ssh.exe"}   only when the ssh on PATH is the wrong one
 
 Only `close` deletes, and only what the task itself can have made. A folder elsewhere must lie in
-the temp folder or a root, be no link, hold no checkout and nothing kept, and have been made after
-the task was opened; where the file system keeps no creation time (Linux) it must be <root>/NAME or
-lie in it. A process must still have the start time it was recorded with. A folder on another
-machine must be <that host's root>/NAME or lie in it. The task's own folder is not deleted while it
-holds a checkout or something uses it. A worktree is never removed here; `sweep` names the ones
-that closed tasks left, for removal through Orca or git.
+the temp folder or a root and hold none of those, be no link, hold no checkout and nothing kept, and
+have been made after the task was opened; where the file system keeps no creation time (Linux) it
+must be <root>/NAME or lie in it. A process must still have the start time it was recorded with. A
+folder on another machine must be <that host's root>/NAME or lie in it. The task's own folder is not
+deleted while it holds a checkout, nor on Windows while a shell or a program still uses it. A
+worktree is never removed here; `sweep` names the ones that closed tasks left, for removal through
+Orca or git.
 """
 import argparse, base64, contextlib, json, os, platform, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, time
 
@@ -128,6 +129,8 @@ def load(cfg, name):
     for folder in (folder_of(cfg, name), os.path.join(cfg['artifacts'], '.closing-' + name)):
         task = read(os.path.join(folder, 'task.json'))
         if task:
+            if linked(folder) or not inside(folder, cfg['artifacts']):
+                fail(f'{folder} is a link to another place, so it is no task folder; nothing was touched')
             # The name is the folder's and the task cannot be older than its folder, whatever the file says.
             task.update(name=name, entries=task.get('entries') or [])
             try:
@@ -144,20 +147,35 @@ def save(folder, task):
     os.replace(os.path.join(folder, 'task.json.tmp'), os.path.join(folder, 'task.json'))
 
 
+def abandoned(lock):
+    """The task.py that wrote this lock runs no more; where that cannot be asked, the lock is 15 minutes old."""
+    try:
+        with open(lock, encoding='utf-8') as f:
+            pid, started = f.read().split()
+        now = process(int(pid)) if int(pid) else 'denied'
+        if now is None:
+            return True
+        if now != 'denied':
+            return abs(now[0] - float(started)) > SLACK
+    except (OSError, ValueError):  # just made and not yet written, or gone again
+        pass
+    try:
+        return time.time() - os.path.getmtime(lock) > 900
+    except OSError:
+        return False
+
+
 @contextlib.contextmanager
 def held(cfg, name):
     """One task.py at a time changes a task's record."""
-    lock, deadline = os.path.join(cfg['artifacts'], f'.lock-{name}'), time.time() + 20
+    lock, deadline, me = os.path.join(cfg['artifacts'], f'.lock-{name}'), time.time() + 20, process(os.getpid())
     while True:
         try:
-            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            with os.fdopen(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY), 'w', encoding='utf-8') as f:
+                f.write(f'{os.getpid()} {me[0]}' if isinstance(me, tuple) else '0 0')  # a system that cannot say: by age
             break
         except FileExistsError:
-            try:
-                stale = time.time() - os.path.getmtime(lock) > 900
-            except OSError:
-                continue
-            if stale:
+            if abandoned(lock):
                 with contextlib.suppress(OSError):
                     os.remove(lock)
             elif time.time() > deadline:
@@ -186,11 +204,14 @@ def not_ours(cfg, task, path):
     """Why this task may not delete the folder `path`, or None when it may."""
     if linked(path):
         return 'it is a link, not a folder of its own'
-    if inside(path, cfg['artifacts']) or real(path) == real(cfg['artifacts']):
+    if any(real(path) == real(shared) or inside(shared, path) for shared in (cfg['artifacts'], *cfg['roots'], tempfile.gettempdir())):
+        return 'it is, or holds, the artifact folder, a root or the temp folder, which all tasks share'
+    if inside(path, cfg['artifacts']):
         return 'folders in the artifact folder belong to their own tasks; this task\'s own goes at close'
-    root = next((root for root in [*cfg['roots'], tempfile.gettempdir()] if inside(path, root)), None)
-    if not root:
+    roots = [root for root in [*cfg['roots'], tempfile.gettempdir()] if inside(path, root)]
+    if not roots:
         return 'it lies outside the temp folder and the roots in machine.json'
+    root = max(roots, key=lambda root: len(real(root)))  # of roots that lie in each other, the one nearest to the folder
     if kept(path, cfg):
         return 'it is on the keep list, or holds something that is'
     nested = checkout_in(path)
@@ -297,9 +318,10 @@ def remote_path(cfg, task, host, path):
     fold = str.lower if there.get('shell') == 'powershell' else str
     roots = [fold(str(root).replace('\\', '/').rstrip('/')) + '/' for root in there.get('roots') or []]
     below = [fold(path)[len(root):].split('/') for root in roots if fold(path).startswith(root)]
-    if not below:
+    if not below or any(root.startswith(fold(path) + '/') for root in roots):
         fail(f'{path} is not below the roots machine.json gives for {host}')
-    if not any(parts[0] == fold(task['name']) and not {'', '.', '..'} & set(parts) for parts in below):
+    parts = min(below, key=len)  # of roots that lie in each other, the one nearest to the folder
+    if parts[0] != fold(task['name']) or {'', '.', '..'} & set(parts):
         fail(f'a folder on another machine must be <root>/{task["name"]} or lie in it, with no relative parts, so that only this task\'s folder can go')
     return path
 
@@ -314,7 +336,7 @@ def remove(path):
             os.chmod(parent, os.stat(parent).st_mode | stat.S_IWUSR | stat.S_IXUSR)
 
     def again(function, target, info):
-        if linked(target):
+        if linked(target) or function not in (os.unlink, os.remove, os.rmdir):  # only a delete can be tried again
             raise info if isinstance(info, BaseException) else info[1]
         writable(target)
         function(target)
@@ -381,7 +403,7 @@ def open_task(cfg, name):
         fail(f'a close of {name} did not finish; run `task.py close {name}` again first')
     os.makedirs(cfg['artifacts'], exist_ok=True)
     with held(cfg, name):
-        if not read(os.path.join(folder, 'task.json')):
+        if linked(folder) or not read(os.path.join(folder, 'task.json')):
             if os.path.lexists(folder) and (linked(folder) or not os.path.isdir(folder) or os.listdir(folder)):
                 fail(f'{folder} is there already and was not opened by this tool; pick another name')
             os.makedirs(folder, exist_ok=True)
@@ -426,10 +448,30 @@ def add(cfg, args):
     print(f'recorded for {args.name}: {args.kind} {shown(entry)}')
 
 
+def note_closed(cfg, task):
+    """Remember a closed task while its worktree is still there, for `sweep` to name."""
+    closed = os.path.join(cfg['artifacts'], '.closed')
+    os.makedirs(closed, exist_ok=True)
+    for old in os.listdir(closed):  # a closed task whose worktree is gone as well leaves nothing to say
+        seen = read(os.path.join(closed, old))
+        if seen is None or not seen.get('worktree') or not os.path.isdir(seen['worktree']):
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(closed, old))
+    if task.get('worktree') and os.path.isdir(task['worktree']):
+        with open(os.path.join(closed, task['name'] + '.json'), 'w', encoding='utf-8') as f:
+            json.dump({**{key: task.get(key) for key in ('name', 'opened', 'machine', 'worktree', 'branch')}, 'closed': time.time()}, f)
+
+
 def close(cfg, name):
     with held(cfg, name):
-        folder, task = load(cfg, name)
         closing = os.path.join(cfg['artifacts'], '.closing-' + name)
+        if os.path.lexists(closing) and not any(read(os.path.join(folder, 'task.json')) for folder in (folder_of(cfg, name), closing)):
+            try:  # task.json goes last: all that was recorded is put back, and only the emptied folder could not go
+                os.rmdir(closing)
+            except OSError as error:
+                fail(f'{closing} could not be deleted ({error}); run `task.py close {name}` again once nothing uses it')
+            return print(f'closed {name}: {folder_of(cfg, name)} deleted')
+        folder, task = load(cfg, name)
         if kept(folder_of(cfg, name), cfg):
             fail(f'{folder} is on the keep list')
         nested = checkout_in(folder)
@@ -460,19 +502,12 @@ def close(cfg, name):
             with os.scandir(closing) as found:
                 for path in [entry.path for entry in found if entry.name != 'task.json']:
                     remove(path)
+            with contextlib.suppress(OSError):
+                note_closed(cfg, task)
             os.remove(os.path.join(closing, 'task.json'))  # last, so that a close that fails here can be run again
             os.rmdir(closing)
         except OSError as error:
             fail(f'{closing} could not be deleted ({error}); run `task.py close {name}` again once nothing uses it')
-        closed = os.path.join(cfg['artifacts'], '.closed')
-        os.makedirs(closed, exist_ok=True)
-        for old in os.listdir(closed):  # a closed task whose worktree is gone as well leaves nothing to say
-            seen = read(os.path.join(closed, old))
-            if seen is None or not seen.get('worktree') or not os.path.isdir(seen['worktree']):
-                os.remove(os.path.join(closed, old))
-        if task.get('worktree') and os.path.isdir(task['worktree']):
-            with open(os.path.join(closed, name + '.json'), 'w', encoding='utf-8') as f:
-                json.dump({**{key: task.get(key) for key in ('name', 'opened', 'machine', 'worktree', 'branch')}, 'closed': time.time()}, f)
     print(f'closed {name}: {folder_of(cfg, name)} deleted')
 
 
