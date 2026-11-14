@@ -1,8 +1,10 @@
+import base64
 import contextlib
 import datetime
 import hashlib
 import io
 import json
+import shutil
 import os
 import subprocess
 import sys
@@ -110,8 +112,11 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['SubagentStop']],
                                  [('reviewer', [gate, 'reviewed'])])
                 self.assertTrue((agents / 'reviewer.md').exists())
-                self.assertEqual((home / 'tools' / 'deepseek.py').read_bytes(),
-                                 (install.REPO / 'tools' / 'deepseek.py').read_bytes())
+                for tool in ('deepseek.py', 'task.py'):
+                    self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
+                self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SessionStart']],
+                                 [[(home / 'tools' / 'task.py').as_posix(), 'daily']])
+                self.assertEqual(install.read_json(home / 'machine.json'), install.read_json(install.REPO / 'machine.example.json'))
                 self.assertEqual(settings['permissions'], {'allow': ['Read']})
                 self.assertEqual(settings['skillOverrides'], {'custom': 'on'})
                 self.assertEqual(install.read_json(first.backup / 'settings.json'), original)
@@ -149,7 +154,7 @@ class InstallerTests(unittest.TestCase):
             with patch.multiple(install, HOME=home, OPENCODE=Path(tmp) / 'none', SHARED={}, RETIRED_AGENTS={}):
                 install.Installer(False).run()
             self.assertTrue((home / 'hooks' / 'read_streak.py').exists())
-            self.assertFalse((home / 'tools').exists())
+            self.assertEqual([tool.name for tool in (home / 'tools').iterdir()], ['task.py'])
 
 
 class ReadStreakHookTests(unittest.TestCase):
@@ -553,6 +558,298 @@ class DeepSeekToolTests(unittest.TestCase):
         self.assertEqual(self.tool('read', ' ').returncode, 1)
         self.env['PATH'] = str(self.bin / 'none')
         self.assertIn('opencode is not on PATH', self.tool('read', 'x').stderr)
+
+
+FAKE_SSH = '''import json, sys
+with open(sys.argv[1], 'a', encoding='utf-8') as f:
+    f.write(json.dumps(sys.argv[2:]) + '\\n')
+sys.exit(1 if sys.argv[-2] == 'broken' else 0)
+'''
+
+
+class TaskToolTests(unittest.TestCase):
+    BIRTH = os.name == 'nt' or hasattr(os.stat('.'), 'st_birthtime')  # Linux keeps no creation time: the folder's name decides there
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.artifacts, self.tests, self.temp = self.root / 'artifacts', self.root / 'tests', self.root / 'temp'
+        for folder in (self.artifacts / 'reference' / 'sdk', self.tests / 'paired' / 'certs', self.temp):
+            folder.mkdir(parents=True)
+        (self.root / 'fake_ssh.py').write_text(FAKE_SSH, encoding='utf-8')
+        self.machine = {'artifacts': str(self.artifacts), 'roots': [str(self.tests)], 'keep': ['reference', str(self.tests / 'paired' / 'certs')],
+                        'hosts': {'nuc': {'ssh': 'nuc', 'shell': 'sh', 'roots': ['/mnt/hdd2']},
+                                  'laptop': {'ssh': 'me@laptop', 'shell': 'powershell', 'roots': ['C:\\src\\Artifacts']},
+                                  'off': {'ssh': 'broken', 'shell': 'sh', 'roots': ['/data']}},
+                        'ssh': [sys.executable, str(self.root / 'fake_ssh.py'), str(self.root / 'ssh.log')]}
+        self.configure()
+        self.env = {**os.environ, 'CLAUDE_MACHINE_FILE': str(self.root / 'machine.json'), 'CLAUDE_TASK_STAMP': str(self.root / 'stamp'),
+                    'TMP': str(self.temp), 'TEMP': str(self.temp), 'TMPDIR': str(self.temp)}
+
+    def configure(self, **changes):
+        self.machine.update(changes)
+        (self.root / 'machine.json').write_text(json.dumps(self.machine), encoding='utf-8')
+
+    def tool(self, *args):
+        return subprocess.run([sys.executable, str(install.REPO / 'tools' / 'task.py'), *map(str, args)], capture_output=True, text=True,
+                              env=self.env, cwd=self.root)
+
+    def refused(self, why, *args):
+        done = self.tool(*args)
+        self.assertEqual(done.returncode, 1, args)
+        self.assertIn(why, done.stderr, args)
+        self.assertNotIn('Traceback', done.stderr)
+
+    def ledger(self, task_name, **changes):
+        path = self.artifacts / task_name / 'task.json'
+        task = json.loads(path.read_text(encoding='utf-8'))
+        if changes:
+            task.update(changes)
+            path.write_text(json.dumps(task), encoding='utf-8')
+        return task
+
+    def link(self, at, to):
+        if os.name == 'nt':  # a junction needs no privilege
+            import _winapi
+            _winapi.CreateJunction(str(to), str(at))
+        else:
+            os.symlink(to, at)
+
+    def python(self, code):
+        return ('& ' if os.name == 'nt' else '') + f'"{sys.executable}" -c "{code}"'
+
+    def sleeper(self, **kw):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], **kw)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        return child
+
+    def test_open_makes_one_folder_and_takes_over_nothing(self):
+        done = self.tool('open', 'fix-a')
+        self.assertEqual((done.returncode, Path(done.stdout.strip())), (0, self.artifacts / 'fix-a'))
+        task = self.ledger('fix-a')
+        self.assertEqual((task['name'], task['entries'], task['worktree']), ('fix-a', [], None))
+        self.assertEqual(self.tool('open', 'fix-a').returncode, 0)
+        self.assertEqual(self.ledger('fix-a')['opened'], task['opened'])
+        (self.artifacts / 'old').mkdir()
+        (self.artifacts / 'old' / 'run.log').write_text('x', encoding='utf-8')
+        self.link(self.artifacts / 'elsewhere', self.temp)
+        for name, why in (('old', 'was not opened by this tool'), ('elsewhere', 'was not opened by this tool'), ('reference', 'keep list'),
+                          ('../x', 'is no task name'), ('.closed', 'is no task name')):
+            self.refused(why, 'open', name)
+        for name in ('old', 'reference', 'elsewhere'):
+            self.refused('open the task first', 'close', name)
+        self.assertTrue((self.artifacts / 'old' / 'run.log').exists())
+        self.assertTrue((self.artifacts / 'reference' / 'sdk').exists())
+        self.assertEqual([p.name for p in self.artifacts.iterdir() if p.name.startswith('.')], [])
+
+    def test_a_folder_elsewhere_goes_only_if_the_task_made_it(self):
+        (self.tests / 'before').mkdir()
+        (self.root / 'elsewhere').mkdir()
+        self.tool('open', 'fix-a')
+        opened, own = self.ledger('fix-a')['opened'], self.tests / 'fix-a'
+        for path in (own / 'profile', own / 'late', own / 'build' / 'deps' / 'clone' / '.git', self.tests / 'repo' / '.git',
+                     self.temp / 'fix-a' / 'deep', self.artifacts / 'other'):
+            path.mkdir(parents=True)
+        self.link(own / 'link', self.root / 'elsewhere')
+        for path, why in ((self.root / 'elsewhere', 'outside the temp folder and the roots'), (self.tests, 'outside the temp folder and the roots'),
+                          (self.tests / 'paired', 'keep list'), (self.tests / 'paired' / 'certs', 'keep list'),
+                          (self.tests / 'repo', 'holds a checkout'), (own / 'build', 'holds a checkout'), (own, 'holds a checkout'),
+                          (own / 'link', 'it is a link'), (self.artifacts / 'other', 'belong to their own tasks'),
+                          (self.artifacts, 'belong to their own tasks'), (self.tests / 'missing', 'is no folder')):
+            self.refused(why, 'add', 'fix-a', 'dir', path)
+        if self.BIRTH:
+            self.ledger('fix-a', opened=opened + 60)  # as if these had been there before the task
+            for path in (self.tests / 'before', own / 'late'):
+                self.refused('was there before the task was opened', 'add', 'fix-a', 'dir', path)
+            self.ledger('fix-a', opened=opened)
+        else:
+            self.refused('keeps no creation time', 'add', 'fix-a', 'dir', self.tests / 'before')
+        for path in (own / 'profile', self.temp / 'fix-a', own / 'late', own / 'profile'):
+            self.assertEqual(self.tool('add', 'fix-a', 'dir', path).returncode, 0, path)
+        self.assertEqual(len(self.ledger('fix-a')['entries']), 3)  # the same folder twice is one entry
+        self.configure(keep=self.machine['keep'] + [str(own / 'late')])  # kept since: close must leave it
+        done = self.tool('close', 'fix-a')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('LEFT dir', done.stdout)
+        self.assertIn('1 of this task', done.stderr)
+        self.assertEqual([Path(e['path']).name for e in self.ledger('fix-a')['entries']], ['late'])
+        self.assertEqual([(own / 'profile').exists(), (self.temp / 'fix-a').exists(), (own / 'late').exists()], [False, False, True])
+        self.configure(keep=self.machine['keep'][:2])
+        done = self.tool('close', 'fix-a')
+        self.assertEqual((done.returncode, done.stderr), (0, ''))
+        self.assertIn('closed fix-a', done.stdout)
+        self.assertEqual(sorted(p.name for p in own.iterdir()), ['build', 'link'])  # never recorded, so they stay
+        self.assertEqual(sorted(p.name for p in self.tests.iterdir()), ['before', 'fix-a', 'paired', 'repo'])
+        self.assertTrue((self.root / 'elsewhere').is_dir())
+        self.assertEqual(sorted(p.name for p in self.artifacts.iterdir()), ['.closed', 'other', 'reference'])
+        self.assertEqual(list((self.artifacts / '.closed').iterdir()), [])
+
+    def test_a_changed_record_cannot_reach_what_the_task_did_not_make(self):
+        (self.tests / 'before').mkdir()
+        time.sleep(2.5)  # older than the slack a clock is allowed
+        self.tool('open', 'fix-a')
+        self.ledger('fix-a', name='hdd2', opened=0, entries=[
+            {'type': 'dir', 'path': str(self.tests / 'before')}, {'type': 'remote', 'host': 'nuc', 'path': '/mnt/hdd2/everything'},
+            'junk', {'type': 'command', 'shell': 'zsh', 'text': 'x'}, {'type': 'process'}, {'type': 'dir', 'path': str(self.tests / 'paired')}])
+        done = self.tool('close', 'fix-a')
+        self.assertEqual((done.returncode, done.stdout.count('LEFT')), (1, 6), done.stdout + done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
+        self.assertTrue((self.tests / 'before').is_dir())
+        self.assertTrue((self.tests / 'paired' / 'certs').is_dir())
+        self.assertFalse((self.root / 'ssh.log').exists())
+        self.assertEqual(len(self.ledger('fix-a')['entries']), 6)
+        self.tool('open', 'hdd2')  # an honest name that is also part of a root
+        self.refused('must be <root>/hdd2', 'add', 'hdd2', 'remote', 'nuc', '/mnt/hdd2/paired')
+
+    def test_the_task_folder_stays_while_it_holds_a_checkout_or_is_in_use(self):
+        self.tool('open', 'fix-a')
+        folder = self.artifacts / 'fix-a'
+        (folder / 'clone' / '.git').mkdir(parents=True)
+        (folder / 'clone' / 'work.txt').write_text('not committed', encoding='utf-8')
+        marker = self.root / 'undone'
+        self.tool('add', 'fix-a', 'command', self.python(f"open('{marker.as_posix()}', 'w').close()"))
+        self.refused('is a checkout inside the task folder', 'close', 'fix-a')
+        self.assertTrue((folder / 'clone' / 'work.txt').exists())
+        self.assertFalse(marker.exists())  # nothing was undone either
+        shutil.rmtree(folder / 'clone')
+        if os.name == 'nt':  # a program standing in the folder: Windows cannot delete it, and must find out before deleting anything
+            (folder / 'out.log').write_text('x', encoding='utf-8')
+            busy = self.sleeper(cwd=folder)
+            self.refused('is in use', 'close', 'fix-a')
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), ['out.log', 'task.json'])
+            self.assertTrue(marker.exists())  # what was recorded is undone first; only the folder waits
+            busy.kill()
+            busy.wait(timeout=15)
+        (folder / 'target').mkdir()
+        (folder / 'target' / 'read-only.bin').write_text('x', encoding='utf-8')
+        os.chmod(folder / 'target' / 'read-only.bin', 0o444)
+        self.link(folder / 'link', self.tests / 'paired')
+        os.rename(folder, self.artifacts / '.closing-fix-a')  # as a close leaves it when it dies half-way
+        self.refused('did not finish', 'open', 'fix-a')
+        self.assertIn('fix-a: a close did not finish, run it again', self.tool('sweep').stdout)
+        done = self.tool('close', 'fix-a')
+        self.assertEqual((done.returncode, done.stderr), (0, ''))
+        self.assertEqual(sorted(p.name for p in self.artifacts.iterdir()), ['.closed', 'reference'])
+        self.assertTrue((self.tests / 'paired' / 'certs').is_dir())  # the link went, what it pointed to stays
+        self.assertTrue(marker.exists())
+
+    def test_a_process_is_ended_only_if_it_is_the_one_recorded(self):
+        self.tool('open', 'fix-a')
+        opened = self.ledger('fix-a')['opened']
+        first = self.sleeper()
+        self.ledger('fix-a', opened=opened + 60)
+        self.refused('was running before the task was opened', 'add', 'fix-a', 'process', first.pid)
+        self.ledger('fix-a', opened=opened)
+        self.refused('is no process number', 'add', 'fix-a', 'process', 'python')
+        self.assertEqual(self.tool('add', 'fix-a', 'process', first.pid).returncode, 0)
+        entry = self.ledger('fix-a')['entries'][0]
+        self.assertEqual(Path(entry['program']).stem.lower()[:6], 'python')
+        self.ledger('fix-a', entries=[{**entry, 'started': entry['started'] - 100}])  # as if the number had gone to another process
+        done = self.tool('close', 'fix-a')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('belongs to another process', done.stdout)
+        self.assertIsNone(first.poll())
+        self.tool('open', 'fix-b')
+        second = self.sleeper()
+        self.assertEqual(self.tool('add', 'fix-b', 'process', second.pid).returncode, 0)
+        done = self.tool('close', 'fix-b')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('ended', done.stdout)
+        second.wait(timeout=15)
+        first.kill()
+        first.wait(timeout=15)
+        self.tool('open', 'fix-c')
+        self.refused('is not running', 'add', 'fix-c', 'process', first.pid)
+
+    @unittest.skipIf(os.name == 'nt', 'a program replacing itself is a POSIX matter')
+    def test_a_wrapper_that_replaced_itself_goes_with_what_it_started(self):
+        self.tool('open', 'fix-a')
+        wrapper = subprocess.Popen(['sh', '-c', 'sleep 0.2; sh -c "sleep 12077" & exec sleep 12078'])
+        self.addCleanup(wrapper.wait)
+        self.addCleanup(wrapper.kill)
+        self.assertEqual(self.tool('add', 'fix-a', 'process', wrapper.pid).returncode, 0)
+        time.sleep(1)  # by now it is `sleep`, not `sh`, under the same number
+        done = self.tool('close', 'fix-a')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('ended', done.stdout)
+        wrapper.wait(timeout=15)
+        time.sleep(0.5)
+        self.assertEqual(subprocess.run(['pgrep', '-f', 'sleep 1207[78]'], capture_output=True).returncode, 1)
+
+    def test_a_command_puts_back_the_rest_and_a_failure_keeps_the_folder(self):
+        self.tool('open', 'fix-a')
+        flag, marker = (self.root / 'flag').as_posix(), self.root / 'restored'
+        failing = self.python(f"import os, sys; sys.exit(0 if os.path.exists('{flag}') else 7)")
+        self.assertEqual(self.tool('add', 'fix-a', 'command', failing, '--why', 'device setting').returncode, 0)
+        self.assertEqual(self.tool('add', 'fix-a', 'command', self.python(f"open('{marker.as_posix()}', 'w').close()")).returncode, 0)
+        done = self.tool('close', 'fix-a')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('LEFT command device setting: exit ', done.stdout)  # Windows PowerShell reports any failure as 1
+        self.assertTrue(marker.exists())
+        self.assertEqual([e.get('why') for e in self.ledger('fix-a')['entries']], ['device setting'])
+        Path(flag).write_text('', encoding='utf-8')
+        self.assertEqual(self.tool('close', 'fix-a').returncode, 0)
+        self.assertFalse((self.artifacts / 'fix-a').exists())
+
+    def test_a_folder_on_another_machine_must_be_the_tasks_own(self):
+        self.tool('open', 'fix-a')
+        for host, path, why in (('tv', '/mnt/hdd2/fix-a', 'no host "tv"'), ('nuc', '/home/x/fix-a', 'not below the roots'),
+                                ('nuc', '/mnt/hdd2', 'not below the roots'), ('nuc', '/mnt/hdd2x/fix-a', 'not below the roots'),
+                                ('nuc', '/mnt/hdd2/other', 'must be <root>/fix-a'), ('nuc', '/mnt/hdd2/x/fix-a', 'must be <root>/fix-a'),
+                                ('nuc', '/mnt/hdd2/fix-a/../other', 'no relative parts'), ('nuc', '/mnt/hdd2/fix-a//x', 'no relative parts'),
+                                ('laptop', 'D:\\x\\fix-a', 'not below the roots')):
+            self.refused(why, 'add', 'fix-a', 'remote', host, path)
+        self.refused('usage: add NAME remote HOST PATH', 'add', 'fix-a', 'remote', 'nuc')
+        self.assertEqual(self.tool('add', 'fix-a', 'remote', 'nuc', '/mnt/hdd2/fix-a/target dir/').returncode, 0)
+        self.assertEqual(self.tool('add', 'fix-a', 'remote', 'laptop', 'c:\\src\\artifacts\\FIX-A\\it\u2019s').returncode, 0)
+        self.assertEqual(self.tool('close', 'fix-a').returncode, 0)
+        calls = [json.loads(line) for line in (self.root / 'ssh.log').read_text(encoding='utf-8').splitlines()]
+        self.assertEqual([call[:5] for call in calls], [['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', 'me@laptop'],
+                                                        ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', 'nuc']])
+        self.assertEqual(calls[1][5], "rm -rf -- '/mnt/hdd2/fix-a/target dir'")
+        script = base64.b64decode(calls[0][5].rsplit(' ', 1)[1]).decode('utf-16-le')
+        self.assertIn("Remove-Item -LiteralPath 'c:/src/artifacts/FIX-A/it\u2019\u2019s' -Recurse -Force", script)
+        self.tool('open', 'fix-b')
+        self.assertEqual(self.tool('add', 'fix-b', 'remote', 'off', '/data/fix-b').returncode, 0)
+        done = self.tool('close', 'fix-b')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('LEFT remote off:/data/fix-b', done.stdout)
+        self.configure(hosts={})  # the host is gone from the machine file: still no crash, and nothing deleted
+        self.assertIn('no host "off"', self.tool('close', 'fix-b').stdout)
+        self.assertTrue((self.artifacts / 'fix-b').exists())
+
+    def test_sweep_lists_what_looks_finished_and_deletes_nothing(self):
+        (self.artifacts / 'legacy').mkdir()
+        for name in ('fix-a', 'fix-b', 'fix-c'):
+            self.tool('open', name)
+        self.ledger('fix-a', worktree=str(self.root / 'gone'))
+        self.ledger('fix-c', worktree=str(self.tests))  # a folder that stays when the task is closed
+        self.assertEqual(self.tool('close', 'fix-c').returncode, 0)
+        done = self.tool('sweep')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        report = done.stdout
+        self.assertIn('Look finished (worktree gone, or untouched for 3 days): 1\n  fix-a: idle 0.0 days, worktree gone', report)
+        self.assertIn('Open: 1\n  fix-b:', report)
+        self.assertIn(f'still there (remove it through Orca or git once no session lives in it): 1\n  fix-c: {self.tests}', report)
+        self.assertIn('  legacy: idle 0.0 days\n', report)
+        self.assertIn('  reference: idle 0.0 days, on the keep list', report)
+        listed = {row['name']: row for row in json.loads(self.tool('sweep', '--json').stdout)}
+        self.assertEqual({name: row['state'] for name, row in listed.items()},
+                         {'fix-a': 'open', 'fix-b': 'open', 'fix-c': 'closed', 'legacy': 'unlisted', 'reference': 'unlisted'})
+        self.assertEqual(sorted(p.name for p in self.artifacts.iterdir()), ['.closed', 'fix-a', 'fix-b', 'legacy', 'reference'])
+        note = json.loads(self.tool('daily').stdout)['hookSpecificOutput']
+        self.assertEqual(note['hookEventName'], 'SessionStart')
+        self.assertIn('1 task folders', note['additionalContext'])
+        self.assertIn('1 closed tasks still have a worktree', note['additionalContext'])
+        again = self.tool('daily')
+        self.assertEqual((again.returncode, again.stdout, again.stderr), (0, '', ''))
+        (self.root / 'stamp').unlink()
+        self.env['CLAUDE_MACHINE_FILE'] = str(self.root / 'none.json')
+        broken = self.tool('daily')
+        self.assertEqual((broken.returncode, broken.stdout, broken.stderr), (0, '', ''))
+        self.refused('cannot read', 'sweep')
 
 
 if __name__ == '__main__':

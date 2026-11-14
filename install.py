@@ -81,13 +81,14 @@ def clean_claude(config):
 # event, matcher, script, its arguments
 HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
          ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
-         ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)))
+         ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)),
+         ('SessionStart', None, 'tools/task.py', ('daily',)))
 
 
 def set_hooks(config):
     """Add this setup's hooks to settings, replacing earlier entries for the same scripts."""
     for event, matcher, name, args in HOOKS:
-        script = HOME / 'hooks' / name
+        script = HOME / (name if '/' in name else 'hooks/' + name)
         entry = {'hooks': [{'type': 'command', 'command': Path(sys.executable).as_posix(),
                             'args': [script.as_posix(), *args], 'timeout': 20 if args else 10}]}
         if matcher:
@@ -243,9 +244,13 @@ class Installer:
         self.install_agents()
         for src in sorted((REPO / 'hooks').glob('*.py')):
             self.place(src, HOME / 'hooks' / src.name)
-        if OPENCODE.is_dir():  # the tools hand work to OpenCode
-            for src in sorted((REPO / 'tools').glob('*.py')):
+        for src in sorted((REPO / 'tools').glob('*.py')):
+            if src.name != 'deepseek.py' or OPENCODE.is_dir():  # that one hands work to OpenCode
                 self.place(src, HOME / 'tools' / src.name)
+        if not (HOME / 'machine.json').exists():
+            print('  create  machine.json (edit it: where task folders go on this machine, what is never deleted)')
+            if not self.dry:
+                shutil.copy2(REPO / 'machine.example.json', HOME / 'machine.json')
         self.settings()
         self.settings('settings.local.json')
         personal = HOME / 'personal.md'
