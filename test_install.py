@@ -328,14 +328,19 @@ class ReviewGateTests(unittest.TestCase):
         self.commit('rewritten')
         self.assertIn('no independent review has seen', self.push())
 
-    def test_a_commit_and_push_in_one_command_is_judged_by_the_working_tree(self):
+    def test_a_commit_and_push_in_one_command_is_judged_by_the_whole_checkout(self):
         self.write('a.rs', 200)
         self.write('b.rs', 100)  # not tracked yet
         one = "git add -A; git commit -F - <<'EOF'\nfeat: b\nEOF\ngit push origin HEAD:main"
         held = self.push(one)
         self.assertIn('299 changed code lines in 2 files', held)
+        self.assertIn('push in a command of its own', held)
+        self.assertIn('`reviewer` agent', held)
         self.assertIn('the working tree against', held)
-        self.assertIn('199 changed code lines in 1 files', self.push('git commit -am "a only"; git push origin HEAD:main'))
+        helper = self.push(one, agent_type='runner')
+        self.assertIn('push in a command of its own', helper)
+        self.assertIn('report this to the agent that sent you', helper)
+        self.assertNotIn('`reviewer` agent', helper)
         self.assertIsNone(self.push())  # nothing is committed, so a bare push carries nothing
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))
         self.write('b.rs', 120)
@@ -346,6 +351,32 @@ class ReviewGateTests(unittest.TestCase):
         self.write('a.rs', 200, mark='z')
         self.assertIn('no independent review has seen', self.push(one))
         self.assertEqual(self.decisions(), ['held', 'held', 'review ran', 'reviewed', 'reviewed', 'held'])
+
+    def test_what_a_commit_in_the_command_takes_is_not_guessed(self):
+        self.write('a.rs', 200)  # someone's unfinished work in a tracked file
+        self.write('sub/n.rs', 200)  # and in a new one
+        self.write('docs/guide.md', 50)
+        for command in ('git add docs/guide.md; git commit -m "docs: guide"; git push origin HEAD:main',  # takes prose only
+                        'git commit -am "fix: a; b"; git push origin HEAD:main',
+                        'git commit -am "fix: a (b) c" > /dev/null; git push origin HEAD:main',
+                        "git commit -am 'don''t break'; git push origin HEAD:main",
+                        'git commit -a --message="a b"; git push origin HEAD:main',
+                        'git commit -am "$(cat msg.txt)"; git push origin HEAD:main',
+                        'git add -A > $null; git commit -m x; git push origin HEAD:main',
+                        'git -C sub add n.rs; git commit -m x; git push origin HEAD:main',
+                        'cd sub; git add n.rs; cd ..; git commit -m x; git push origin HEAD:main',
+                        'git stage -A; git commit -m x; git push origin HEAD:main',
+                        '$f = "a.rs"; git add $f; git commit -m x; git push origin HEAD:main',
+                        'git commit -m x docs/guide.md; git push origin HEAD:main'):
+            self.assertIn('399 changed code lines in 2 files', self.push(command), command)
+        self.git('add', 'sub/n.rs')
+        (self.repo / 'sub/n.rs').unlink()  # staged, then gone from the tree: a plain commit still takes it
+        self.assertIn('399 changed code lines in 2 files', self.push('git commit -m x; git push origin HEAD:main'))
+        self.git('reset', '-q')
+        self.git('add', 'docs/guide.md')  # made apart, the commit of the guide alone goes out
+        self.git('commit', '-q', '-m', 'docs: guide')
+        self.assertIsNone(self.push())
+        self.assertEqual(set(self.decisions()), {'held'})
 
     def test_the_push_is_judged_in_the_checkout_the_command_names(self):
         self.write('b.rs', 300)
@@ -397,10 +428,11 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn('300 changed code lines', self.push('git push origin feat:main'))
         self.assertIsNone(self.push('git push origin HEAD:main'))  # main itself carries nothing
         self.assertIsNone(self.push('git fetch origin; git rebase origin/main; git push origin HEAD:main'))
-        for command in ('git merge --ff-only feat; git push origin main', 'git cherry-pick feat && git push origin HEAD:main'):
+        for command in ('git merge --ff-only feat; git push origin main', 'git cherry-pick feat && git push origin HEAD:main',
+                        'git revert --no-edit HEAD~3; git push origin HEAD:main'):
             self.assertIn('a command of its own', self.push(command), command)
         self.assertIsNone(self.push('git merge --ff-only feat; git push origin main  # REVIEW_SKIP=merge train'))
-        self.assertEqual(self.decisions(), ['held', 'held', 'held', 'skipped'])
+        self.assertEqual(self.decisions(), ['held', 'held', 'held', 'held', 'skipped'])
 
     def test_what_counts_as_a_push_to_main(self):
         self.write('b.rs', 300)

@@ -11,11 +11,13 @@ The note holds a mark for every line the change added or removed then, so a reba
 other people's edits leaves it valid. Lines the note lacks count as fixes: up to 150 of
 them, and no more than the review saw, pass without a second review. A note lasts a day.
 
-A command that commits and pushes at once is judged by the working tree, since its commit
-does not exist yet; one that merges or picks commits and pushes at once is told to push in
-a command of its own. A command that carries REVIEW_SKIP=<reason>, as a trailing
-`# REVIEW_SKIP=<reason>` comment in any shell, passes and is logged, for a change the user
-wants out fast.
+A command that commits and pushes at once is judged by everything the checkout holds beyond
+main, staged or not, since its commit does not exist yet and a hook cannot tell from the
+command text what it will take. If that is held, the message says to commit first and push
+in a command of its own, which is then judged by the commit alone. One that merges, picks
+or reverts commits and pushes at once is told the same. A command that carries
+REVIEW_SKIP=<reason>, as a trailing `# REVIEW_SKIP=<reason>` comment in any shell, passes
+and is logged, for a change the user wants out fast.
 
 Holds, passes on a review, skips and errors are appended to ~/.claude/review-gate.log. The
 hook only reads the checkout; on any error it lets the push through.
@@ -30,7 +32,7 @@ QUOTED = r'(?:"([^"]+)"|\'([^\']+)\'|([^\s;&|)]+))'
 START = r'(?:^|[;&|\n({]|\b(?:then|do|else)\s)\s*'  # where a command begins, so text inside a commit message is no push
 GIT = r'(?:[A-Za-z_]\w*=\S*\s+)*git(?:\.exe)?(?P<options>(?:\s+-[cC]\s+' + QUOTED + r'|\s+--?[\w-]+(?:=\S+)?)*)\s+'
 PUSH = re.compile(START + GIT + r'push\b(?P<rest>[^|;&\n)}]*)', re.I)
-MADE = re.compile(START + GIT + r'(?P<verb>commit|add|merge|cherry-pick|am)\b', re.I)
+MADE = re.compile(START + GIT + r'(?P<verb>commit|merge|cherry-pick|revert|am)\b', re.I)
 MOVE = re.compile(START + r'(?:cd|Set-Location|sl|pushd|Push-Location)\s+(?:-(?:Literal)?Path\s+)?' + QUOTED, re.I)
 SKIP = re.compile(r'REVIEW_SKIP\s*[=:]\s*[\'"]?([^\'";\n]+)', re.I)
 
@@ -46,40 +48,50 @@ def base_of(repo, tip='HEAD'):
     return git(repo, 'merge-base', 'origin/main', tip) or git(repo, 'merge-base', 'origin/master', tip)
 
 
-def changes(repo, base, tip, tree, new_files=False):
-    """Per code file, a mark for every line added or removed since `base`: in the commits up to `tip`, or in the
-    working tree, with the files git does not track yet if asked. A mark is the line without its indentation, so the
-    marks of a change survive a rebase onto other edits of the same file. Lines too short to tell apart (a brace, a
-    blank) are marked `~`: they count as changed lines but never as lines a review covered."""
-    marks, path, body = {}, None, False
+def changes(top, base, tip='HEAD', checkout=False):
+    """Per code file, a mark for every line added or removed since `base`: in the commits up to `tip`, or with
+    `checkout` in everything the checkout holds, which is the index, the working tree and the files git does not
+    track yet. A mark is the line without its indentation, so the marks of a change survive a rebase onto other edits
+    of the same file. Lines too short to tell apart (a brace, a blank) are marked `~`: they count as changed lines but
+    never as lines a review covered."""
+    marks = {}
 
-    def mark(path, sign, text):
+    def mark(found, path, sign, text):
         text = text.strip()
         key = ('~' if len(text) < 4 else '') + hashlib.blake2b((sign + text).encode('utf-8', 'replace'), digest_size=6).hexdigest()
-        marks.setdefault(path, collections.Counter())[key] += 1
+        found.setdefault(path, collections.Counter())[key] += 1
 
-    diff = git(repo, 'diff', '--no-renames', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '-U0',
-               base, *([] if tree else [tip]))
-    for row in (diff or '').split('\n'):
-        if row.startswith('diff --git a/'):
-            names = row[len('diff --git '):]
-            name = names[2:2 + (len(names) - 5) // 2]
-            path, body = (name if names == f'a/{name} b/{name}' and not PROSE.search(name) else None), False
-        elif row.startswith('@@'):
-            body = True
-        elif path and body and row[:1] in ('+', '-'):
-            mark(path, row[0], row[1:])
-    if new_files:
-        for name in (git(repo, 'ls-files', '--others', '--exclude-standard') or '').splitlines()[:200]:
-            if not PROSE.search(name):
-                try:
-                    with open(os.path.join(repo, name), 'rb') as f:
-                        data = f.read(2_000_000)
-                except OSError:
-                    continue
-                if b'\0' not in data[:8000]:  # git would call it binary and count no lines
-                    for text in data.decode('utf-8', 'replace').replace('\r\n', '\n').split('\n')[:-1 if data.endswith(b'\n') else None]:
-                        mark(name, '+', text)
+    def diff(*args):
+        found, path, body = {}, None, False
+        rows = git(top, 'diff', '--no-renames', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '-U0', *args)
+        for row in (rows or '').split('\n'):
+            if row.startswith('diff --git a/'):
+                names = row[len('diff --git '):]
+                name = names[2:2 + (len(names) - 5) // 2]
+                path, body = (name if names == f'a/{name} b/{name}' and not PROSE.search(name) else None), False
+            elif row.startswith('@@'):
+                body = True
+            elif path and body and row[:1] in ('+', '-'):
+                mark(found, path, row[0], row[1:])
+        marks.update(found)
+
+    if not checkout:
+        diff(base, tip)
+        return marks
+    diff('--cached', base)  # a file staged and then changed back still goes into a plain `git commit`
+    diff(base)
+    for name in (git(top, 'ls-files', '--others', '--exclude-standard', '--full-name') or '').splitlines()[:200]:
+        if not PROSE.search(name):
+            try:
+                with open(os.path.join(top, name), 'rb') as f:
+                    data = f.read(2_000_000)
+            except OSError:
+                continue
+            if b'\0' not in data[:8000]:  # git would call it binary and count no lines
+                found = {}
+                for text in data.decode('utf-8', 'replace').replace('\r\n', '\n').split('\n')[:-1 if data.endswith(b'\n') else None]:
+                    mark(found, name, '+', text)
+                marks.update(found)
     return marks
 
 
@@ -105,7 +117,7 @@ def local(path, cwd):
 
 
 def pushed(command, cwd):
-    """For a push to main in this command: the checkout it acts on, the command text before it, and what it pushes."""
+    """For a push to main in this command: the checkout, the command text before it, and what it pushes."""
     for m in PUSH.finditer(command):
         rest = m.group('rest').split(' #')[0]
         if re.search(r'--dry-run|--delete\b', rest):
@@ -166,14 +178,14 @@ def push(event, least):
     made = {m.group('verb').lower() for m in MADE.finditer(before)}
     skip = SKIP.search(command)
     reason = skip.group(1).strip()[:200] if skip else None
-    if made & {'merge', 'cherry-pick', 'am'}:  # commits that do not exist yet and are not in the working tree either
+    if made - {'commit'}:  # commits that do not exist yet and are not in the working tree either
         if skip:
             return log(repo=top, decision='skipped', reason=reason)
         log(repo=top, decision='held', reason='commits brought in by the same command', agent=event.get('agent_type'))
         return deny('Push held back: this command brings in commits and pushes them at once, so the review hook cannot see '
                     'what the push carries. Run the push as a command of its own.')
-    tree = 'commit' in made and tip == 'HEAD'  # that commit does not exist yet: count what it takes from the working tree
-    marks = changes(top, base, tip, tree, tree and 'add' in made)
+    tree = 'commit' in made and tip == 'HEAD'  # that commit does not exist yet, and what it takes is not ours to guess
+    marks = changes(top, base, tip, tree)
     total = sum(sum(file.values()) for file in marks.values())
     if total < least:
         return
@@ -182,10 +194,19 @@ def push(event, least):
     new, covered, noted = unreviewed(top, marks)
     if noted and (new == 0 or covered and new <= min(FIX_LINES, covered)):  # fixes, not a change larger than what was reviewed
         return log(repo=top, lines=total, decision='reviewed', since_review=new)
-    log(repo=top, lines=total, decision='held', since_review=new if covered else None, agent=event.get('agent_type'))
+    log(repo=top, lines=total, decision='held', since_review=new if covered else None, agent=event.get('agent_type'),
+        **({'counted': 'checkout'} if tree else {}))
     what = (f'{new} changed code lines came after the last review, more than its margin for fixes' if covered else
             f'{total} changed code lines in {len(marks)} files that no independent review has seen')
-    if event.get('agent_type') in HELPERS:
+    if tree:  # the usual false hold: other work lying in the tree while a small commit goes out
+        what += ('. This command commits and pushes at once, so that is everything the checkout holds beyond main, staged '
+                 'or not. If the commit takes less, make it first and push in a command of its own, which is judged by '
+                 'the commit alone. If it takes all of it')
+        if event.get('agent_type') in HELPERS:
+            return deny(f'Push held back: {what}, do not retry; report this to the agent that sent you, which must have the '
+                        'diff reviewed first.')
+        what += ', it needs a review'
+    elif event.get('agent_type') in HELPERS:
         return deny(f'Push held back: {what}. Do not retry; report this to the agent that sent you, which must have the diff reviewed first.')
     span = f'the working tree against {base[:10]}' if tree else f'the range {base[:10]}..{tip}'
     deny(f'Push held back: {what}. Start the `reviewer` agent with the repository path ({top}), {span} and the request this '
@@ -204,7 +225,7 @@ def reviewed(event):
     base = base_of(top) if top else None
     if not base:  # interrupted, or a review of something that is not a checkout: it unlocks nothing
         return log(repo=repo or event.get('cwd'), decision='review not counted')
-    marks = changes(top, base, 'HEAD', True, True)
+    marks = changes(top, base, 'HEAD', True)
     with open(note_path(top), 'w', encoding='utf-8') as f:
         json.dump({'time': time.time(), 'files': marks}, f)
     log(repo=top, lines=sum(sum(file.values()) for file in marks.values()), decision='review ran')
