@@ -134,30 +134,31 @@ def push(cfg, pair, files, was, tmp):
     first and moved in one by one, so that nothing there reads a half-written file, and a file is moved
     only while the one it replaces is still what this run read (`was`: name -> content, absent = no file)."""
     remote, staged, out = pair['remote'], pair['remote'] + '.incoming', os.path.join(tmp, 'out')
-    want = {name: hashlib.sha256(was[name]).hexdigest() if name in was else '' for name in files}
     for name, data in files.items():
         write(out, name, data)
+    # What each file replaces, in a file of its own (a command line holds few), the index after the files it points to.
+    write(out, '.want', ''.join(f'{name} {hashlib.sha256(was[name]).hexdigest() if name in was else ""}\n'
+                               for name in sorted(files, key=lambda name: (name == INDEX, name))).encode('ascii'))
     if pair['shell'] in ('powershell', 'pwsh'):
         def shell(script):
             # Its own errors arrive as XML: say them in a line instead.
             script = "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; try { " + script + " } catch { 'failed: ' + $_.Exception.Message; exit 1 }"
             return f'{pair["shell"]} -NoProfile -NonInteractive -EncodedCommand ' + base64.b64encode(script.encode('utf-16-le')).decode()
-        make = shell(f"if (Test-Path -LiteralPath '{staged}') {{ Remove-Item -LiteralPath '{staged}' -Recurse -Force }}; New-Item -ItemType Directory -Path '{staged}' | Out-Null")
-        table = '; '.join(f"'{name}' = '{digest}'" for name, digest in sorted(want.items()))
-        move = shell(f"$want = @{{ {table} }}; $sha = [Security.Cryptography.SHA256]::Create(); foreach ($name in $want.Keys) {{ $to = Join-Path '{remote}' $name; "
+        make = shell(f"if (Test-Path -LiteralPath '{staged}') {{ Remove-Item -LiteralPath '{staged}' -Recurse -Force }}")
+        move = shell(f"$sha = [Security.Cryptography.SHA256]::Create(); foreach ($line in [IO.File]::ReadAllLines((Join-Path '{staged}' '.want'))) {{ "
+                     f"$name, $digest = $line.Split(' '); $to = Join-Path '{remote}' $name; "
                      "$now = if (Test-Path -LiteralPath $to) { [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($to))).Replace('-', '').ToLower() } else { '' }; "
-                     f"if ($now -eq $want[$name]) {{ Move-Item -LiteralPath (Join-Path '{staged}' $name) -Destination $to -Force; 'moved: ' + $name }} }}; "
+                     f"if ($now -eq $digest) {{ Move-Item -LiteralPath (Join-Path '{staged}' $name) -Destination $to -Force; 'moved: ' + $name }} }}; "
                      f"Remove-Item -LiteralPath '{staged}' -Recurse -Force")
     else:
         there, here = shlex.quote(remote), shlex.quote(staged)
-        make = f'rm -rf -- {here} && mkdir -p -- {here}'
-        move = 'set -e; sum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | cut -d" " -f1; }; ' + ''.join(
-            f'now=""; if [ -f {there}/{name} ]; then now=$(sum {there}/{name}); fi; '
-            f'if [ "$now" = "{digest}" ]; then mv -f -- {here}/{name} {there}/{name}; echo "moved: {name}"; fi; ' for name, digest in sorted(want.items())) + f'rm -rf -- {here}'
+        make = f'rm -rf -- {here}'
+        move = ('set -e; sum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | cut -d" " -f1; }; '
+                f'while read -r name digest; do now=""; if [ -f {there}/"$name" ]; then now=$(sum {there}/"$name"); fi; '
+                f'if [ "$now" = "$digest" ]; then mv -f -- {here}/"$name" {there}/"$name"; echo "moved: $name"; fi; done < {here}/.want; rm -rf -- {here}')
     ssh = [*cfg['ssh'], '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', pair['address']]
     run([*ssh, make], f'cannot prepare {staged} on {pair["host"]}')
-    run([*cfg['scp'], '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', *(os.path.join(out, name) for name in sorted(files)), f'{pair["address"]}:{staged}/'],
-        f'cannot copy to {pair["host"]}')
+    run([*cfg['scp'], '-r', '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', out, f'{pair["address"]}:{staged}'], f'cannot copy to {pair["host"]}')
     said = run([*ssh, move], f'the move into {pair["remote"]} on {pair["host"]} did not finish; the next run sorts out what arrived')
     return {line[len('moved: '):].strip() for line in said.splitlines() if line.startswith('moved: ')} & set(files)
 
@@ -306,7 +307,7 @@ def plan(local, remote, base, first, mine=(), theirs=()):
 def unfinished(state, local, remote):
     """What a run that did not finish had already done. Its plan lies in `pending`: the base it was
     heading for, and which machine each file was meant for. A file counts as synced once every machine
-    it was meant for holds exactly it; the index, once both machines hold theirs."""
+    it was meant for holds exactly it; a machine's index, once that machine holds it."""
     pending = read_all(os.path.join(state, 'pending'), every=True)[0]
     try:
         meant = json.loads(pending.pop('.plan.json'))
@@ -314,9 +315,10 @@ def unfinished(state, local, remote):
         return {}
     took = {name: pending[name] for name, sides in meant.items() if name in pending and name != INDEX and sides
             and all((local if side == 'here' else remote).get(name) == pending[name] for side in sides)}
-    whole, here, there = (pending.get(INDEX + end) for end in ('', '.here', '.there'))
-    if None not in (whole, here, there) and local.get(INDEX) == here and remote.get(INDEX) == there:
-        took.update({INDEX: whole, INDEX + '.here': here, INDEX + '.there': there})
+    sides = {INDEX + end: pending[INDEX + end] for end, found in (('.here', local), ('.there', remote))
+             if pending.get(INDEX + end) is not None and found.get(INDEX) == pending[INDEX + end]}
+    if sides and INDEX in pending:  # the whole it came from goes with it: what the other machine still lacks is then seen as owed
+        took.update({INDEX: pending[INDEX], **sides})
     return took
 
 
@@ -367,13 +369,17 @@ def sync(cfg, name, dry=False, mine=(), theirs=()):
         local, remote = ({n: d for n, d in found.items() if n not in skip} for found in (all_here, all_there))
         took, stored = unfinished(state, local, remote), read_all(os.path.join(state, 'base'), every=True)[0]
         stored.update(took)
+        for n, data in took.items() if not dry else ():  # at once: this run may be cut off too
+            write(os.path.join(state, 'base'), n, data)
         base = {n: d for n, d in stored.items() if n.endswith('.md')}
         was = [stored.get(INDEX + end, base.get(INDEX, b'')) for end in ('.here', '.there')]  # each machine's index after the last run
         for where, found, before in ((('this machine', local, was[0]), (pair['host'], remote, was[1]))):
+            meant = f'; if that is meant, delete {os.path.join(state, "base")} and run again as for the first time'
             if len(base) >= 4 and len(found) < len(base) / 2:  # a wrong path or an emptied folder, not an edit
-                raise Stop(f'{where} has {len(found)} memory files where the last run left {len(base)}')
-            if INDEX in found and len(pointers(before)) >= 4 and len(pointers(found[INDEX])) < len(pointers(before)) / 2:
-                raise Stop(f'{INDEX} on {where} has {len(pointers(found[INDEX]))} pointers where the last run left {len(pointers(before))}')
+                raise Stop(f'{where} has {len(found)} memory files where the last run left {len(base)}' + meant)
+            had, has = len(pointers(before)), len(pointers(found.get(INDEX, before)))
+            if had >= 4 and has < had / 2 or had and not has:
+                raise Stop(f'{INDEX} on {where} has {has} pointers where the last run left {had}' + meant)
         unknown = sorted({*mine, *theirs} - {*local, *remote, *base})
         if unknown:
             raise Stop(f'no such memory file on either machine: {", ".join(unknown)}')
@@ -450,8 +456,6 @@ def sync(cfg, name, dry=False, mine=(), theirs=()):
                 else:
                     write(folder, n, data)
         if not dry:
-            for n, data in took.items():  # what an unfinished run had done is part of the base now
-                write(os.path.join(state, 'base'), n, data)
             for n, data in keep.items():
                 if n not in late and stored.get(n) != data:
                     write(os.path.join(state, 'base'), n, data)

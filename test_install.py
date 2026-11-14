@@ -1221,6 +1221,46 @@ class MemorySyncTests(unittest.TestCase):
         self.assertNotIn('gone.md', self.read(self.there, 'MEMORY.md'))
         self.assertFalse(self.state.joinpath('proj', 'pending').exists())
 
+    def test_two_runs_cut_off_in_a_row_lose_no_record(self):
+        for name in ('a.md', 'b.md'):
+            self.put(name, self.memo(''.join(self.ROWS)))
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) \u2014 a\n- [B](b.md) \u2014 b\n')
+        self.tool('proj')
+        self.put('n.md', self.memo('new here\n'), self.here)
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) \u2014 a, said better\n- [B](b.md) \u2014 b\n- [N](n.md) \u2014 n\n', self.here)
+        self.during((2, {}, True))  # run 1: moved in on the other machine, then the connection is lost
+        self.tool('proj', code=2)
+        self.assertEqual(self.names(self.there), ['MEMORY.md', 'a.md', 'b.md', 'n.md'])
+        self.put('a.md', self.memo('edited here\n', '2026-02-01T00:00:00.000Z'), self.here)
+        self.during((1, {}, True))  # run 2: cut off before anything is copied
+        self.tool('proj', code=2)
+        self.calm()
+        (self.here / 'n.md').unlink()  # forgotten here, with its pointer; and the other pointer edited once more
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) \u2014 a, said better still\n- [B](b.md) \u2014 b\n', self.here)
+        said = self.tool('proj', code=1)
+        self.assertIn('n.md was deleted here and is still on the other machine', said)
+        self.assertNotIn('MEMORY.md was changed on both', said)  # only this machine edited it
+        self.assertEqual(self.names(self.here), ['MEMORY.md', 'a.md', 'b.md'])
+        self.assertEqual(self.read(self.here, 'MEMORY.md'), 'Rules\n- [A](a.md) \u2014 a, said better still\n- [B](b.md) \u2014 b\n')
+        self.assertEqual(self.read(self.there, 'MEMORY.md'), 'Rules\n- [A](a.md) \u2014 a, said better still\n- [B](b.md) \u2014 b\n- [N](n.md) \u2014 n\n')
+        self.assertEqual(self.read(self.there, 'a.md'), self.memo('edited here\n', '2026-02-01T00:00:00.000Z'))
+
+    def test_many_files_go_in_one_push_and_the_index_last(self):
+        names = [f'note-{n:03}.md' for n in range(60)]
+        for name in names:
+            self.put(name, self.memo('first\n'))
+        self.put('MEMORY.md', ''.join(f'- [N](%s) \u2014 x\n' % name for name in names))
+        self.tool('proj')
+        for name in names:
+            self.put(name, self.memo('edited here\n', '2026-02-01T00:00:00.000Z'), self.here)
+        self.put('MEMORY.md', ''.join(f'- [N](%s) \u2014 y\n' % name for name in names), self.here)
+        self.assertIn('to box: MEMORY.md, note-000.md', self.tool('proj'))
+        self.assertEqual([self.read(self.there, name) for name in names], [self.memo('edited here\n', '2026-02-01T00:00:00.000Z')] * 60)
+        self.assertEqual(self.read(self.there, 'MEMORY.md'), self.read(self.here, 'MEMORY.md'))
+        self.assertEqual(self.names(self.root / 'there'), ['memory'])
+        self.put('MEMORY.md', '', self.there)  # an emptied index stops the run, however few pointers it had
+        self.assertIn('delete', self.tool('proj', code=2))
+
 
 if __name__ == '__main__':
     unittest.main()
