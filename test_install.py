@@ -239,7 +239,7 @@ class ReviewGateTests(unittest.TestCase):
     def write(self, name, lines, mark='x'):
         path = self.repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(''.join(f'{mark} {n}\n' for n in range(lines)), encoding='utf-8')
+        path.write_text(''.join(f'{mark} line {n}\n' for n in range(lines)), encoding='utf-8')
 
     def commit(self, message):
         self.git('add', '-A')
@@ -281,7 +281,7 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn('report this to the agent that sent you', self.push(agent_type='runner'))
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message='Clean.\nReviewed: ' + str(self.repo)))
         self.assertIsNone(self.push())
-        self.write('b.rs', 300, mark='y')  # fixes after the review: every line of b.rs changes, 100 more added
+        self.write('b.rs', 340)  # fixes after the review: 40 lines more in b.rs and a new file of 100
         self.write('c.rs', 100)
         self.commit('fixes')
         self.assertIsNone(self.push())
@@ -290,7 +290,7 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn('came after the last review', self.push())
         self.assertEqual(self.decisions(), ['held', 'held', 'review ran', 'reviewed', 'reviewed', 'held'])
 
-    def test_a_review_of_uncommitted_work_counts_and_is_spent_once_it_landed(self):
+    def test_a_review_of_uncommitted_work_counts_and_does_not_cover_the_next_task(self):
         self.write('b.rs', 200)
         self.write('new/c.rs', 90)  # not yet added to git
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Low: a.\n\nReviewed: `{self.repo}`\n'))
@@ -310,7 +310,7 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))  # a clean tree
         self.write('b.rs', 100)
         self.commit('written after the review')
-        self.assertIn('100 changed code lines came after the last review', self.push())
+        self.assertIn('no independent review has seen', self.push())
         self.git('reset', '-q', '--hard', 'origin/main')
         self.write('b.rs', 30)
         self.write('c.rs', 20)
@@ -320,6 +320,33 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn('70 changed code lines came after the last review', self.push())
         self.assertEqual(self.decisions(), ['review not counted', 'held', 'review ran', 'held', 'review ran', 'held'])
 
+    def test_a_review_covers_the_content_it_saw_not_a_line_count(self):
+        self.write('b.rs', 300)
+        self.commit('large')
+        self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))
+        self.write('b.rs', 300, mark='y')  # as many lines, all of them different
+        self.commit('rewritten')
+        self.assertIn('no independent review has seen', self.push())
+
+    def test_a_commit_and_push_in_one_command_is_judged_by_the_working_tree(self):
+        self.write('a.rs', 200)
+        self.write('b.rs', 100)  # not tracked yet
+        one = "git add -A; git commit -F - <<'EOF'\nfeat: b\nEOF\ngit push origin HEAD:main"
+        held = self.push(one)
+        self.assertIn('299 changed code lines in 2 files', held)
+        self.assertIn('the working tree against', held)
+        self.assertIn('199 changed code lines in 1 files', self.push('git commit -am "a only"; git push origin HEAD:main'))
+        self.assertIsNone(self.push())  # nothing is committed, so a bare push carries nothing
+        self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))
+        self.write('b.rs', 120)
+        self.assertIsNone(self.push(one))
+        self.commit('feat: b')
+        self.assertIsNone(self.push())
+        self.git('push', '-q', 'origin', 'HEAD:main')
+        self.write('a.rs', 200, mark='z')
+        self.assertIn('no independent review has seen', self.push(one))
+        self.assertEqual(self.decisions(), ['held', 'held', 'review ran', 'reviewed', 'reviewed', 'held'])
+
     def test_the_push_is_judged_in_the_checkout_the_command_names(self):
         self.write('b.rs', 300)
         self.commit('large')
@@ -328,6 +355,9 @@ class ReviewGateTests(unittest.TestCase):
                         f'git -C "{self.repo}" push origin HEAD:main', f"git -C '{self.repo}' push"):
             self.assertIsNotNone(self.push(command, **elsewhere), command)
         self.assertIsNone(self.push(**elsewhere))
+        for command in (f'(cd "{self.repo}" && git push origin HEAD:main)', f'Push-Location {self.repo}; git push origin HEAD:main; Pop-Location',
+                        f'& {{ Set-Location "{self.repo}"; git push origin HEAD:main}}'):
+            self.assertIsNotNone(self.push(command, **elsewhere), command)
         self.assertIsNotNone(self.push('cd work && git push origin HEAD:main', **elsewhere))
         self.assertIsNotNone(self.push('Set-Location $unknown; git push origin HEAD:main'))
         if os.name == 'nt':  # Git Bash writes C:\x as /c/x
@@ -339,6 +369,38 @@ class ReviewGateTests(unittest.TestCase):
             self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message='Reviewed: ' + bash, **elsewhere))
             self.commit('large')
             self.assertIsNone(self.push())
+
+    def test_a_rebase_onto_other_edits_of_the_same_file_needs_no_second_review(self):
+        self.write('a.rs', 50)
+        self.commit('a file both sides will edit')
+        self.git('push', '-q', 'origin', 'HEAD:main')
+        self.write('a.rs', 150)  # ours: 100 lines at the end
+        self.commit('ours')
+        self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))
+        self.git('checkout', '-q', '-b', 'theirs', 'origin/main')
+        (self.repo / 'a.rs').write_text(''.join(f'u line {n}\n' for n in range(80)) + (self.repo / 'a.rs').read_text(encoding='utf-8'),
+                                        encoding='utf-8')  # theirs: 80 lines at the top
+        self.commit('theirs')
+        self.git('push', '-q', 'origin', 'theirs:main')
+        self.git('checkout', '-q', 'main')
+        self.git('fetch', '-q', 'origin')
+        self.git('rebase', '-q', 'origin/main')
+        self.assertEqual(len((self.repo / 'a.rs').read_text(encoding='utf-8').splitlines()), 230)
+        self.assertIsNone(self.push())
+        self.assertEqual(self.decisions(), ['review ran', 'reviewed'])
+
+    def test_a_push_of_another_branch_or_of_commits_the_command_brings_in(self):
+        self.git('checkout', '-q', '-b', 'feat')
+        self.write('b.rs', 300)
+        self.commit('large')
+        self.git('checkout', '-q', 'main')
+        self.assertIn('300 changed code lines', self.push('git push origin feat:main'))
+        self.assertIsNone(self.push('git push origin HEAD:main'))  # main itself carries nothing
+        self.assertIsNone(self.push('git fetch origin; git rebase origin/main; git push origin HEAD:main'))
+        for command in ('git merge --ff-only feat; git push origin main', 'git cherry-pick feat && git push origin HEAD:main'):
+            self.assertIn('a command of its own', self.push(command), command)
+        self.assertIsNone(self.push('git merge --ff-only feat; git push origin main  # REVIEW_SKIP=merge train'))
+        self.assertEqual(self.decisions(), ['held', 'held', 'held', 'skipped'])
 
     def test_what_counts_as_a_push_to_main(self):
         self.write('b.rs', 300)
