@@ -14,8 +14,9 @@ them, and no more than the review saw, pass without a second review. A note last
 A command that commits and pushes at once is judged by everything the checkout holds beyond
 main, staged or not, since its commit does not exist yet and a hook cannot tell from the
 command text what it will take. If that is held, the message says to commit first and push
-in a command of its own, which is then judged by the commit alone. One that merges, picks
-or reverts commits and pushes at once is told the same. A command that carries
+in a command of its own, which is then judged by the commits it pushes. A push of a branch
+the command creates is counted the same way. One that merges, picks or reverts commits and
+pushes at once is told to push apart. A command that carries
 REVIEW_SKIP=<reason>, as a trailing `# REVIEW_SKIP=<reason>` comment in any shell, passes
 and is logged, for a change the user wants out fast.
 
@@ -61,6 +62,10 @@ def changes(top, base, tip='HEAD', checkout=False):
         key = ('~' if len(text) < 4 else '') + hashlib.blake2b((sign + text).encode('utf-8', 'replace'), digest_size=6).hexdigest()
         found.setdefault(path, collections.Counter())[key] += 1
 
+    def keep(found):  # a file staged and then edited again counts for the larger of its two states, line by line
+        for path, lines in found.items():
+            marks[path] = marks.get(path, collections.Counter()) | lines
+
     def diff(*args):
         found, path, body = {}, None, False
         rows = git(top, 'diff', '--no-renames', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '-U0', *args)
@@ -73,7 +78,7 @@ def changes(top, base, tip='HEAD', checkout=False):
                 body = True
             elif path and body and row[:1] in ('+', '-'):
                 mark(found, path, row[0], row[1:])
-        marks.update(found)
+        keep(found)
 
     if not checkout:
         diff(base, tip)
@@ -91,7 +96,7 @@ def changes(top, base, tip='HEAD', checkout=False):
                 found = {}
                 for text in data.decode('utf-8', 'replace').replace('\r\n', '\n').split('\n')[:-1 if data.endswith(b'\n') else None]:
                     mark(found, name, '+', text)
-                marks.update(found)
+                keep(found)
     return marks
 
 
@@ -173,6 +178,9 @@ def push(event, least):
         return
     top, before, tip = pushed(command, event.get('cwd') or os.getcwd())
     base = base_of(top, tip) if top else None
+    fresh = bool(top) and not base and tip != 'HEAD'  # a branch this command creates before it pushes it
+    if fresh:
+        tip, base = 'HEAD', base_of(top)
     if not base:
         return
     made = {m.group('verb').lower() for m in MADE.finditer(before)}
@@ -184,7 +192,7 @@ def push(event, least):
         log(repo=top, decision='held', reason='commits brought in by the same command', agent=event.get('agent_type'))
         return deny('Push held back: this command brings in commits and pushes them at once, so the review hook cannot see '
                     'what the push carries. Run the push as a command of its own.')
-    tree = 'commit' in made and tip == 'HEAD'  # that commit does not exist yet, and what it takes is not ours to guess
+    tree = fresh or 'commit' in made and tip == 'HEAD'  # that commit does not exist yet, and what it takes is not ours to guess
     marks = changes(top, base, tip, tree)
     total = sum(sum(file.values()) for file in marks.values())
     if total < least:
@@ -199,9 +207,9 @@ def push(event, least):
     what = (f'{new} changed code lines came after the last review, more than its margin for fixes' if covered else
             f'{total} changed code lines in {len(marks)} files that no independent review has seen')
     if tree:  # the usual false hold: other work lying in the tree while a small commit goes out
-        what += ('. This command commits and pushes at once, so that is everything the checkout holds beyond main, staged '
-                 'or not. If the commit takes less, make it first and push in a command of its own, which is judged by '
-                 'the commit alone. If it takes all of it')
+        what += ('. This command makes what it pushes, so the count is over everything the checkout holds beyond main, '
+                 'staged or not. If the push takes less, make the commit first and push in a command of its own, which is '
+                 'judged by the commits it pushes. If it takes all of it')
         if event.get('agent_type') in HELPERS:
             return deny(f'Push held back: {what}, do not retry; report this to the agent that sent you, which must have the '
                         'diff reviewed first.')

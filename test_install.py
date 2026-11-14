@@ -372,6 +372,10 @@ class ReviewGateTests(unittest.TestCase):
         self.git('add', 'sub/n.rs')
         (self.repo / 'sub/n.rs').unlink()  # staged, then gone from the tree: a plain commit still takes it
         self.assertIn('399 changed code lines in 2 files', self.push('git commit -m x; git push origin HEAD:main'))
+        self.git('add', 'a.rs')
+        self.write('a.rs', 5)  # staged, then cut down in the tree: the commit takes the 200 lines
+        for command in ('git commit -m x; git push origin HEAD:main', 'git switch -c fix; git commit -m x; git push origin fix:main'):
+            self.assertIn('399 changed code lines in 2 files', self.push(command), command)
         self.git('reset', '-q')
         self.git('add', 'docs/guide.md')  # made apart, the commit of the guide alone goes out
         self.git('commit', '-q', '-m', 'docs: guide')
