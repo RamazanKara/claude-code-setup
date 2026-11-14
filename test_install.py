@@ -943,15 +943,22 @@ while at < len(args):
     at += 1
 if any(arg.startswith('broken') for arg in rest):
     sys.exit('ssh: connect to host broken: timed out')
+# What a test asks to happen during a run: [{"at": "ssh 2" | "again", "write": {path: text}, "fail": true}]
+what = 'again' if '-r' in flags and os.path.basename(rest[-1]) == 'again' else ''
+if mode == 'ssh':
+    what = 'ssh %d' % sum(1 for line in open(log, encoding='utf-8') if json.loads(line)[0] == 'ssh')
+events, fail = log + '.events.json', False
+if os.path.exists(events):
+    for event in json.load(open(events, encoding='utf-8')):
+        if event['at'] == what:
+            for path, text in event.get('write', {}).items():
+                open(path, 'w', encoding='utf-8', newline='').write(text)
+            fail = event.get('fail', False)
 if mode == 'ssh':  # the other machine is this one: run what it was asked to
-    sys.exit(subprocess.run(rest[1], shell=True).returncode)
+    code = subprocess.run(rest[1], shell=True).returncode
+    sys.exit('ssh: connection lost' if fail else code)
 paths = [arg[len('me@box:'):] if arg.startswith('me@box:') else arg for arg in rest]
 if '-r' in flags:
-    late = log + '.late.json'
-    if os.path.basename(paths[1]) == 'again' and os.path.exists(late):  # an edit on the other machine while the sync runs
-        for name, text in json.load(open(late, encoding='utf-8')).items():
-            open(os.path.join(paths[0], name), 'w', encoding='utf-8', newline='').write(text)
-        os.remove(late)
     shutil.copytree(paths[0], paths[1])
 else:
     for source in paths[:-1]:
@@ -960,6 +967,8 @@ else:
 
 
 class MemorySyncTests(unittest.TestCase):
+    ROWS = ['- one\n', '- two\n', '- three\n', '- four\n', '- five\n', '- six\n', '- seven\n']
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -982,6 +991,17 @@ class MemorySyncTests(unittest.TestCase):
         self.assertNotIn('Traceback', done.stderr)
         return done.stdout + done.stderr
 
+    def during(self, *events):
+        """In the next run: at its n-th ssh call (1 prepares the push, 2 moves the files in) or its second
+        fetch ('again'), write files and, for ssh, lose the connection after the command ran."""
+        calls = sum(1 for line in self.log.read_text(encoding='utf-8').splitlines() if json.loads(line)[0] == 'ssh') if self.log.exists() else 0
+        planned = [{'at': at if at == 'again' else f'ssh {calls + at}', 'write': {str(path): text for path, text in write.items()}, 'fail': fail} for at, write, fail in events]
+        Path(str(self.log) + '.events.json').write_text(json.dumps(planned), encoding='utf-8')
+        self.addCleanup(lambda: Path(str(self.log) + '.events.json').unlink(missing_ok=True))
+
+    def calm(self):
+        Path(str(self.log) + '.events.json').unlink(missing_ok=True)
+
     @staticmethod
     def memo(body, saved='2026-01-01T00:00:00.000Z', by='s1'):
         return f'---\nname: note\ndescription: a note\nmetadata:\n  type: feedback\n  originSessionId: {by}\n  modified: {saved}\n---\n\n{body}'
@@ -991,7 +1011,7 @@ class MemorySyncTests(unittest.TestCase):
             (side / name).write_text(text, encoding='utf-8', newline='')
 
     def read(self, side, name):
-        return (side / name).read_text(encoding='utf-8')
+        return (side / name).read_bytes().decode('utf-8')
 
     def names(self, side):
         return sorted(p.name for p in side.iterdir())
@@ -1004,46 +1024,51 @@ class MemorySyncTests(unittest.TestCase):
         self.put('differ.md', self.memo('another version\n'), self.there)
         self.put('own.md', 'this machine\n', self.here)
         self.put('own.md', 'that machine\n', self.there)
+        self.put('odd name.md', 'x\n', self.here)
+        self.put('.hidden.md', 'x\n', self.here)
         self.put('MEMORY.md', '- [A](a.md) — a\n- [Here](only-here.md) — h\n- [Own](own.md) — o\n', self.here)
         self.put('MEMORY.md', '- [A](a.md) — a\n- [There](only-there.md) — t\n- [Own](own.md) — o\n', self.there)
-        os.utime(self.here / 'MEMORY.md', (time.time() + 60,) * 2)  # the newer one gives the order
         said = self.tool('proj', '--dry', code=1)
         self.assertIn('dry run: nothing written', said)
         self.assertEqual((self.names(self.there), self.state.joinpath('proj', 'base').exists(), self.state.joinpath('proj', 'backup').exists()),
                          (['MEMORY.md', 'a.md', 'differ.md', 'only-there.md', 'own.md'], False, False))
         said = self.tool('proj', code=1)
         self.assertIn('needs a hand: differ.md differs and was never synced', said)
-        self.assertEqual(self.names(self.here), self.names(self.there))
-        self.assertEqual(self.names(self.here), ['MEMORY.md', 'a.md', 'differ.md', 'only-here.md', 'only-there.md', 'own.md'])
+        self.assertIn('left alone, a name this tool does not pass on: .hidden.md, odd name.md', said)
+        self.assertEqual(self.names(self.there), ['MEMORY.md', 'a.md', 'differ.md', 'only-here.md', 'only-there.md', 'own.md'])
+        self.assertEqual(self.names(self.here), ['.hidden.md', 'MEMORY.md', 'a.md', 'differ.md', 'odd name.md', 'only-here.md', 'only-there.md', 'own.md'])
         self.assertEqual((self.read(self.here, 'differ.md'), self.read(self.there, 'differ.md')), (self.memo('one version\n'), self.memo('another version\n')))
-        self.assertEqual(self.state.joinpath('proj', 'theirs', 'differ.md').read_text(encoding='utf-8'), self.memo('another version\n'))
+        self.assertEqual(self.state.joinpath('proj', 'theirs', 'differ.md').read_bytes().decode('utf-8'), self.memo('another version\n'))
         self.assertEqual((self.read(self.here, 'own.md'), self.read(self.there, 'own.md')), ('this machine\n', 'that machine\n'))  # excluded: each its own
-        self.assertEqual(self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md'))
-        self.assertEqual(self.read(self.here, 'MEMORY.md'), '- [A](a.md) — a\n- [There](only-there.md) — t\n- [Here](only-here.md) — h\n- [Own](own.md) — o\n')
+        whole = '- [A](a.md) — a\n- [Here](only-here.md) — h\n- [There](only-there.md) — t\n- [Own](own.md) — o\n'
+        self.assertEqual((self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md')), (whole, whole))
         self.assertEqual(len(list(self.state.joinpath('proj', 'backup').iterdir())), 1)
-        self.assertFalse((self.root / 'there' / 'memory.incoming').exists())
+        self.assertEqual(self.names(self.root / 'there'), ['memory'])  # nothing left beside it
         self.assertIn('to this machine: differ.md', self.tool('proj', '--theirs', 'differ.md'))
         self.assertEqual(self.read(self.here, 'differ.md'), self.memo('another version\n'))
         self.assertIn('in step', self.tool(code=2))  # every pair: this one in step, the other one's machine away
         self.assertFalse(self.state.joinpath('proj', 'theirs').exists())
 
     def test_an_edit_on_one_machine_goes_to_the_other_and_a_save_alone_is_no_edit(self):
-        for name in ('a.md', 'b.md', 'c.md'):
-            self.put(name, self.memo('first\n'))
+        for name in ('a.md', 'b.md', 'c.md', 'd.md'):
+            self.put(name, self.memo('first\nsecond\n'))
         self.tool('proj')
         self.put('a.md', self.memo('edited here\n', '2026-02-01T00:00:00.000Z', 's2'), self.here)
         self.put('b.md', self.memo('edited there\n', '2026-02-02T00:00:00.000Z', 's3'), self.there)
-        self.put('c.md', self.memo('first\n', '2026-02-03T00:00:00.000Z', 's4'), self.there)  # saved again, nothing changed
+        self.put('c.md', self.memo('first\nsecond\n', '2026-02-03T00:00:00.000Z', 's4'), self.there)  # saved again, nothing changed
+        self.put('d.md', self.memo('first\nsecond\n').replace('\n', '\r\n'), self.here)  # other line endings, nothing changed
         said = self.tool('proj')
         self.assertIn('to box: a.md\n', said)
         self.assertIn('to this machine: b.md\n', said)
         self.assertEqual(self.read(self.there, 'a.md'), self.memo('edited here\n', '2026-02-01T00:00:00.000Z', 's2'))
         self.assertEqual(self.read(self.here, 'b.md'), self.memo('edited there\n', '2026-02-02T00:00:00.000Z', 's3'))
-        self.assertEqual(self.read(self.here, 'c.md'), self.memo('first\n'))
+        self.assertEqual((self.read(self.here, 'c.md'), self.read(self.there, 'd.md')), (self.memo('first\nsecond\n'),) * 2)
+        self.put('d.md', self.memo('first\nsecond, edited\n'), self.there)  # an edit there still arrives, whatever the line endings here
+        self.assertIn('to this machine: d.md', self.tool('proj'))
         self.assertIn('in step', self.tool('proj'))
 
     def test_edits_on_both_machines_merge_when_they_lie_apart_and_stay_when_they_do_not(self):
-        rows = ['- one\n', '- two\n', '- three\n', '- four\n', '- five\n', '- six\n', '- seven\n']
+        rows = self.ROWS
         self.put('m.md', self.memo(''.join(rows)))
         self.tool('proj')
         self.put('m.md', self.memo(''.join(['- ONE\n'] + rows[1:]), '2026-02-01T00:00:00.000Z', 's2'), self.here)
@@ -1057,7 +1082,7 @@ class MemorySyncTests(unittest.TestCase):
         said = self.tool('proj', code=1)
         self.assertIn('needs a hand: m.md was changed on both machines in the same lines', said)
         self.assertEqual((self.read(self.here, 'm.md'), self.read(self.there, 'm.md')), (mine, theirs))  # no merge markers, nothing lost
-        self.assertEqual(self.state.joinpath('proj', 'theirs', 'm.md').read_text(encoding='utf-8'), theirs)
+        self.assertEqual(self.state.joinpath('proj', 'theirs', 'm.md').read_bytes().decode('utf-8'), theirs)
         self.put('m.md', both.replace('- two', '- two, here and there'), self.here)
         self.assertIn('to box: m.md', self.tool('proj', '--mine', 'm.md'))
         self.assertEqual(self.read(self.there, 'm.md'), both.replace('- two', '- two, here and there'))
@@ -1065,47 +1090,63 @@ class MemorySyncTests(unittest.TestCase):
         self.tool('proj', '--mine', 'm.md', '--theirs', 'm.md', code=2)
         self.tool('--mine', 'm.md', code=2)  # two pairs: which one?
 
-    def test_a_deleted_file_is_neither_copied_back_nor_deleted_on_the_other_machine(self):
+    def test_a_deleted_file_is_neither_copied_back_nor_deleted_and_keeps_its_pointer_where_it_still_is(self):
         for name in ('a.md', 'b.md', 'wrong.md'):
             self.put(name, self.memo(name + '\n'))
         self.put('MEMORY.md', 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n- [Wrong](wrong.md) — w\n')
         self.tool('proj')
-        (self.here / 'wrong.md').unlink()  # dropped here, with its pointer
+        (self.here / 'wrong.md').unlink()  # forgotten here, with its pointer
         self.put('MEMORY.md', 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n', self.here)
-        (self.there / 'b.md').unlink()  # dropped there, the pointer forgotten
+        (self.there / 'b.md').unlink()  # dropped there, the pointer left behind
         for run in range(2):
             said = self.tool('proj', code=1)
             self.assertIn('wrong.md was deleted here and is still on the other machine', said)
             self.assertIn('b.md was deleted on the other machine and is still here', said)
             self.assertEqual((self.names(self.here), self.names(self.there)), (['MEMORY.md', 'a.md', 'b.md'], ['MEMORY.md', 'a.md', 'wrong.md']))
-            self.assertEqual(self.read(self.here, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n')
-            self.assertEqual(self.read(self.there, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n')  # no pointer to a file that machine lacks
-        (self.there / 'wrong.md').unlink()  # by hand, as the report asks
-        self.assertIn('to box: MEMORY.md, b.md', self.tool('proj', '--mine', 'b.md'))  # with its pointer
+            self.assertEqual(self.read(self.here, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n')  # b.md is still here: so is its pointer
+            self.assertEqual(self.read(self.there, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n- [Wrong](wrong.md) — w\n')  # and none to a file it lacks
+        self.assertIn('to this machine: MEMORY.md, wrong.md', self.tool('proj', '--theirs', 'wrong.md', code=1))  # back, with its pointer
+        self.assertEqual(self.read(self.here, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n- [Wrong](wrong.md) — w\n')
+        (self.here / 'wrong.md').unlink()
+        (self.there / 'wrong.md').unlink()  # by hand on both, as the report asks; the pointers follow
+        self.assertIn('to box: MEMORY.md, b.md', self.tool('proj', '--mine', 'b.md'))
         self.assertIn('in step', self.tool('proj'))
-        self.assertEqual(self.read(self.there, 'MEMORY.md'), self.read(self.here, 'MEMORY.md'))
+        self.assertEqual((self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md')), ('Rules\n- [A](a.md) — a\n- [B](b.md) — b\n',) * 2)
         (self.there / 'MEMORY.md').unlink()
         self.assertIn('MEMORY.md was deleted on one machine', self.tool('proj', code=1))
         self.assertEqual(self.read(self.here, 'MEMORY.md'), 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n')
+        self.assertIn('to box: MEMORY.md', self.tool('proj', '--mine', 'MEMORY.md'))
 
     def test_the_index_is_merged_by_the_file_a_line_points_to(self):
-        for name in ('a.md', 'b.md', 'c.md'):
+        for name in ('a.md', 'b.md', 'c.md', 'Build-Env.md'):
             self.put(name, self.memo(name + '\n'))
-        self.put('MEMORY.md', 'Rules\n- [A](a.md) — one\n- [B](b.md) — two\n\nState\n- [C](c.md) — three\n')
+        first = 'Rules\n- [A](a.md) — one\n- [B](b.md) — two\n\nState\n- [C](c.md) — three\n- [Env](build-env.md) — in another case\n'
+        self.put('MEMORY.md', first)
         self.tool('proj')
         self.put('d.md', self.memo('d\n'), self.here)
-        self.put('MEMORY.md', 'Rules\n- [A](a.md) — one, said better\n- [B](b.md) — two\n- [D](d.md) — four\n\nState\n- [C](c.md) — three\n', self.here)
+        self.put('MEMORY.md', first.replace('— one', '— one, said better').replace('- [B](b.md) — two\n', '- [B](b.md) — two\n- [D](d.md) — four\n'), self.here)
         self.put('e.md', self.memo('e\n'), self.there)
-        self.put('MEMORY.md', 'Rules\n- [A](a.md) — one\n- [B](b.md) — two, said better\n\nState\n- [C](c.md) — three\n- [E](e.md) — five\n', self.there)
+        self.put('MEMORY.md', first.replace('— two', '— two, said better').replace('- [C](c.md) — three\n', '- [C](c.md) — three\n- [E](e.md) — five\n'), self.there)
         self.tool('proj')
-        whole = 'Rules\n- [A](a.md) — one, said better\n- [B](b.md) — two, said better\n- [D](d.md) — four\n\nState\n- [C](c.md) — three\n- [E](e.md) — five\n'
+        whole = ('Rules\n- [A](a.md) — one, said better\n- [B](b.md) — two, said better\n- [D](d.md) — four\n\nState\n- [C](c.md) — three\n- [E](e.md) — five\n'
+                 '- [Env](build-env.md) — in another case\n')
         self.assertEqual((self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md')), (whole, whole))
         self.assertEqual(self.names(self.here), self.names(self.there))
         self.put('MEMORY.md', whole.replace('State\n', 'Project state\n'), self.there)  # a heading follows the machine that changed it
-        self.put('MEMORY.md', whole.replace('- [B](b.md) — two, said better\n', ''), self.here)
+        self.put('MEMORY.md', whole.replace('- [B](b.md) — two, said better\n', ''), self.here)  # a pointer taken out while the file stays
         self.tool('proj')
-        self.assertEqual(self.read(self.here, 'MEMORY.md'), whole.replace('State\n', 'Project state\n').replace('- [B](b.md) — two, said better\n', ''))
-        self.assertEqual(self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md'))
+        whole = whole.replace('State\n', 'Project state\n').replace('- [B](b.md) — two, said better\n', '')
+        self.assertEqual((self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md')), (whole, whole))
+        mine, theirs = whole.replace('— three', '— three, from here').replace('Rules', 'The rules'), whole.replace('— three', '— three, from there')
+        self.put('MEMORY.md', mine, self.here)
+        self.put('MEMORY.md', theirs, self.there)
+        self.assertIn('needs a hand: MEMORY.md was changed on both machines in the same lines', self.tool('proj', code=1))
+        self.assertEqual((self.read(self.here, 'MEMORY.md'), self.read(self.there, 'MEMORY.md')), (mine, theirs))  # neither edit is dropped
+        self.assertIn('to box: MEMORY.md', self.tool('proj', '--mine', 'MEMORY.md'))
+        self.assertEqual(self.read(self.there, 'MEMORY.md'), mine)
+        self.put('MEMORY.md', '', self.there)  # emptied by a mistake, not edited
+        self.assertIn('MEMORY.md on box has 0 pointers where the last run left 5', self.tool('proj', code=2))
+        self.assertEqual(self.read(self.here, 'MEMORY.md'), mine)
 
     def test_it_stops_and_writes_nothing_when_the_other_machine_is_away_or_a_folder_looks_emptied(self):
         for name in 'abcdef':
@@ -1125,22 +1166,60 @@ class MemorySyncTests(unittest.TestCase):
         (self.state / 'proj' / 'lock').write_text('', encoding='utf-8')
         self.assertIn('another sync of it is running', self.tool('proj', code=2))
 
-    def test_a_file_changed_while_it_runs_waits_for_the_next_run(self):
-        rows = ['- one\n', '- two\n', '- three\n', '- four\n', '- five\n', '- six\n', '- seven\n']
-        self.put('m.md', self.memo(''.join(rows)))
-        self.put('n.md', self.memo('n\n'))
+    def test_a_file_changed_while_it_runs_is_not_overwritten_and_waits_for_the_next_run(self):
+        rows = self.ROWS
+        for name in ('m.md', 'n.md', 'p.md', 'q.md'):
+            self.put(name, self.memo(''.join(rows)))
+        self.put('MEMORY.md', '- [M](m.md) — m\n')
         self.tool('proj')
-        self.put('m.md', self.memo(''.join(['- ONE\n'] + rows[1:]), '2026-02-01T00:00:00.000Z'), self.here)
-        self.put('n.md', self.memo('n, edited\n', '2026-02-01T00:00:00.000Z'), self.here)
-        late = self.memo(''.join(rows[:6] + ['- SEVEN\n']), '2026-02-02T00:00:00.000Z')
-        Path(str(self.log) + '.late.json').write_text(json.dumps({'m.md': late}), encoding='utf-8')
+        edit = lambda row, text, saved='2026-02-01T00:00:00.000Z': self.memo(''.join(rows[:row] + [text] + rows[row + 1:]), saved)
+        self.put('m.md', edit(0, '- ONE\n'), self.here)  # for the other machine, which edits it before the second look
+        self.put('n.md', edit(0, '- ONE\n'), self.here)  # for the other machine, undisturbed
+        self.put('p.md', edit(0, '- ONE\n'), self.here)  # for the other machine, which edits it during the push
+        self.put('q.md', edit(6, '- SEVEN\n'), self.there)  # for this machine, where it is edited during the push
+        self.put('x.md', self.memo('new there\n'), self.there)  # new there with its pointer, and edited before the second look
+        self.put('MEMORY.md', '- [M](m.md) — m\n- [X](x.md) — x\n', self.there)
+        late = '2026-02-02T00:00:00.000Z'
+        self.during(('again', {self.there / 'm.md': edit(6, '- SEVEN\n', late), self.there / 'x.md': self.memo('new there, edited\n', late)}, False),
+                    (1, {self.there / 'p.md': edit(6, '- SEVEN\n', late), self.here / 'q.md': edit(0, '- ONE\n', late)}, False))
+        said = self.tool('proj', code=1)
+        self.assertIn('changed while this ran, left for the next run: m.md, p.md, q.md, x.md', said)
+        self.assertIn('to box: n.md\n', said)
+        self.assertEqual([self.read(self.there, 'm.md'), self.read(self.there, 'p.md'), self.read(self.here, 'q.md'), self.read(self.there, 'n.md')],
+                         [edit(6, '- SEVEN\n', late), edit(6, '- SEVEN\n', late), edit(0, '- ONE\n', late), edit(0, '- ONE\n')])
+        self.assertEqual((self.read(self.here, 'MEMORY.md'), (self.here / 'x.md').exists()), ('- [M](m.md) — m\n', False))  # no pointer before its file
+        self.calm()
         said = self.tool('proj')
-        self.assertIn('changed while this ran, left for the next run: m.md', said)
-        self.assertIn('to box: n.md', said)
-        self.assertEqual((self.read(self.there, 'm.md'), self.read(self.there, 'n.md')), (late, self.memo('n, edited\n', '2026-02-01T00:00:00.000Z')))
-        self.assertIn('merged on both: m.md', self.tool('proj'))
-        self.assertEqual(self.read(self.here, 'm.md'), self.memo(''.join(['- ONE\n'] + rows[1:6] + ['- SEVEN\n']), '2026-02-02T00:00:00.000Z'))
-        self.assertEqual(self.read(self.here, 'm.md'), self.read(self.there, 'm.md'))
+        self.assertIn('merged on both: m.md, p.md, q.md', said)
+        self.assertIn('to this machine: MEMORY.md, x.md', said)
+        both = self.memo(''.join(['- ONE\n'] + rows[1:6] + ['- SEVEN\n']), late)
+        for name in ('m.md', 'p.md', 'q.md'):
+            self.assertEqual((self.read(self.here, name), self.read(self.there, name)), (both, both), name)
+        self.assertIn('in step', self.tool('proj'))
+
+    def test_a_run_that_stops_half_way_is_finished_by_the_next_one(self):
+        for name in ('a.md', 'b.md', 'c.md', 'gone.md'):
+            self.put(name, self.memo(''.join(self.ROWS)))
+        self.put('MEMORY.md', 'Rules\n- [A](a.md) — a\n- [B](b.md) — b\n- [C](c.md) — c\n- [Gone](gone.md) — g\n')
+        self.tool('proj')
+        self.put('new.md', self.memo('new here\n'), self.here)
+        self.put('edit.md', self.memo('new here too\n'), self.here)
+        (self.there / 'gone.md').unlink()  # the pointer left behind there: this run takes it out of that machine's index
+        self.during((2, {}, True))  # the files are moved in, then the connection is lost
+        self.assertIn('did not finish', self.tool('proj', code=2))
+        self.assertEqual(self.names(self.there), ['MEMORY.md', 'a.md', 'b.md', 'c.md', 'edit.md', 'new.md'])
+        self.calm()
+        (self.here / 'new.md').unlink()  # forgotten here since: it must not come back from the other machine
+        self.put('edit.md', self.memo('new here too, edited\n', '2026-02-01T00:00:00.000Z'), self.here)
+        said = self.tool('proj', code=1)
+        self.assertIn('new.md was deleted here and is still on the other machine', said)
+        self.assertIn('to box: edit.md', said)
+        self.assertNotIn('never synced', said)
+        self.assertFalse((self.here / 'new.md').exists())
+        self.assertEqual(self.read(self.there, 'edit.md'), self.memo('new here too, edited\n', '2026-02-01T00:00:00.000Z'))
+        self.assertIn('- [Gone](gone.md) — g\n', self.read(self.here, 'MEMORY.md'))  # gone.md is still here: so is its pointer
+        self.assertNotIn('gone.md', self.read(self.there, 'MEMORY.md'))
+        self.assertFalse(self.state.joinpath('proj', 'pending').exists())
 
 
 if __name__ == '__main__':
