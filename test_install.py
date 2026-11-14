@@ -212,7 +212,7 @@ class CostReportTests(unittest.TestCase):
             out = subprocess.run([sys.executable, str(install.ROOT / 'tools' / 'cost_report.py'), '--root', tmp],
                                  capture_output=True, text=True, check=True).stdout
         self.assertIn('last 7 days: $4.00', out)
-        self.assertIn('Advisor calls: 1, $1.50 at list prices', out)
+        self.assertIn('Advisor calls: 1, $1.20 at list prices', out)  # Fable 5.2: $8 in, $40 out
         self.assertIn('main chat on opus 1', out)
 
 

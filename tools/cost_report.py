@@ -18,10 +18,13 @@ an estimate for comparing habits, not a bill.
 import argparse, collections, datetime, glob, json, os
 
 # model substring: (input, output, cache read, cache write 1h, cache write 5m)
+# From https://platform.claude.com/docs/en/about-claude/pricing (2026-11-14). The first matching key wins.
 PRICES = {
+    'fable-5-2': (8, 40, .20, 16, 10),
     'fable-5-1': (10, 50, .25, 20, 12.5),
     'fable': (10, 50, 1, 20, 12.5),  # Fable 5: cache read at the usual 0.1x input
     'opus': (4, 20, .20, 8, 5),
+    'sonnet-5-5': (2, 10, .10, 4, 2.5),
     'sonnet': (2, 10, .20, 4, 2.5),
     'haiku': (.10, .50, .01, .20, .125),
 }
