@@ -16,23 +16,25 @@ An Orca worker reports to the session that started it, which a subagent cannot r
 
 `claude/settings.json` sets `CLAUDE_CODE_SUBAGENT_MODEL` to `opus`, so a subagent started without a model no longer inherits Fable from a Fable session. In our transcripts of the four days to 2026-11-13 that was 20 general-purpose runs for $429 at list prices, against $767 for 85 runs on Opus, and no call had asked for Fable. The helpers keep the model in their definition and a `model` passed to the Agent tool still wins (both checked with `claude -p`), so the rules ask for `sonnet` or `haiku` on simple work. A fork always runs on its parent's model, hence the rule to brief a fresh agent there. If your main model is Sonnet or Haiku, change the value in `claude/settings.json` before installing, or subagents cost more than the session that starts them.
 
+`claude/settings.json` also sets `advisorModel` to `fable`. Claude Code's [advisor tool](https://code.claude.com/docs/en/advisor) lets the working model ask a stronger one, which reads the whole conversation, at decision points; subagents inherit it. With Opus as the default subagent model, the work runs on Opus and Fable is asked where the plan matters. No setting forces a call, so a rule tells an agent on Opus to consult it on every task of more than a few steps: before committing to an approach, when stuck, and before declaring the work done. The setting cannot be limited to one main model, so a Fable session gets a Fable advisor too. Advisor tokens are not in a message's own usage totals; `tools/cost_report.py` lists the calls on a separate line at list prices ($1.95 a call in our first 30, each an uncached read of the conversation). Anthropic's page says they are billed at the advisor's rates, or to usage credits on some plans, so check your own usage before leaving it on.
+
 The installer also copies `claude/hooks/read_streak.py` to `~/.claude/hooks` and registers it as a `PostToolBatch` hook in `settings.json`, run by the Python that ran the installer (rerun it if that Python moves). The hook counts turns in a row that made one read-only call and, at the third and every sixth after, adds one line telling the model to batch its reads or hand the survey to a helper (in a subagent, to `scout` or `deepseek.py`). It never blocks a call, skips the cheap helper agents, and `CLAUDE_READ_STREAK` sets the first nudge (0 turns it off). The reason is in our own transcripts (`tools/context_fill.py`, four days to 2026-11-13): 80 to 90% of turns made a single tool call, and streaks of three or more turns with one read-only call each were 19% of main-chat and 37% of subagent spend, while whole-file reads of over 350 lines were 2% of what fills the main context. So the hook watches turns, not file size.
 
 Edit templates here before reinstalling. Keep machine-specific paths in `~/.claude/personal.md`, which Claude imports and the other agents get inlined; rerun the installer after editing it. Existing hooks, credentials and allow permissions are preserved. The installer removes deny permissions, the old desktop skill blocks, OpenCode helper routing and the disabled general agent override. It also removes the retired Opus helper definitions when their contents still match this setup; user replacements are preserved.
 
 ## Contents
 
-- `claude/CLAUDE.md`: autonomy, focused changes, verification, Git landing, lean context, delegation (helpers, DeepSeek workers through Orca or `deepseek.py`, subagent models, briefs) and temporary-output rules.
+- `claude/CLAUDE.md`: autonomy, focused changes, verification, Git landing, lean context, delegation (helpers, DeepSeek workers through Orca or `deepseek.py`, subagent models, the advisor, briefs) and temporary-output rules.
 - `claude/agents/`: Haiku scout, runner and mechanic definitions.
 - `claude/hooks/read_streak.py`: the nudge after read-only turns of one call each.
 - `opencode/agents/`: DeepSeek V4.1 Flash scout, runner and mechanic definitions, without deny permissions.
 - `codex/agents/`: GPT-6 Luna scout, runner and mechanic definitions at medium reasoning effort.
 - `antigravity/agents/`: Gemini Flash scout, runner and mechanic definitions.
 - `claude/tools/deepseek.py`: a DeepSeek read or scaffolding run that waits and prints only the report.
-- `claude/settings.json`: output, effort and compaction settings, and Opus as the default subagent model.
+- `claude/settings.json`: output, effort and compaction settings, Opus as the default subagent model and Fable as the advisor.
 - `opencode/opencode.json`: DeepSeek V4.1 Flash as OpenCode's default model at maximum reasoning, and context limits for Anthropic models, Gemini 4 Argon and Kimi K3.1 Pro.
 - `test_install.py`: installer migration, backup and repeat-install checks, and the hook's and the DeepSeek tool's behaviour (`python -m unittest -v`).
-- `tools/cost_report.py`: optional historical transcript analysis; it does not control the workflow.
+- `tools/cost_report.py`: optional historical transcript analysis, with advisor calls listed apart; it does not control the workflow.
 - `tools/context_fill.py`: what fills Claude Code contexts (tool results by tool, shell output by command kind) and where the turns go (tool calls per turn, spend in read-only streaks).
 - `tools/opencode_cost.py`: where OpenCode's Anthropic spend goes: cost split, context sizes, what fills the context, and the 5-minute vs 1-hour cache trade-off.
 

@@ -1,4 +1,5 @@
 import contextlib
+import datetime
 import hashlib
 import io
 import json
@@ -94,6 +95,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(batch[0], other)
                 self.assertEqual([g['hooks'][0]['args'] for g in batch[1:]], [[script.as_posix()]])
                 self.assertEqual(settings['env'], {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus'})
+                self.assertEqual(settings['advisorModel'], 'fable')
                 self.assertEqual((home / 'tools' / 'deepseek.py').read_bytes(),
                                  (install.REPO / 'tools' / 'deepseek.py').read_bytes())
                 self.assertEqual(settings['permissions'], {'allow': ['Read']})
@@ -195,6 +197,23 @@ class ReadStreakHookTests(unittest.TestCase):
         done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'read_streak.py')], input='not json',
                               capture_output=True, text=True, env=self.env)
         self.assertEqual((done.returncode, done.stdout), (0, ''))
+
+
+class CostReportTests(unittest.TestCase):
+    def test_advisor_tokens_are_listed_apart_from_the_total(self):
+        usage = {'input_tokens': 1_000_000, 'iterations': [
+            {'type': 'message', 'input_tokens': 1_000_000},
+            {'type': 'advisor_message', 'model': 'claude-fable-5-2', 'input_tokens': 100_000, 'output_tokens': 10_000}]}
+        entry = {'type': 'assistant', 'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                 'message': {'id': 'm1', 'model': 'claude-opus-5-5', 'usage': usage, 'content': []}}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'project').mkdir()
+            (Path(tmp) / 'project' / 'session.jsonl').write_text(json.dumps(entry) + '\n', encoding='utf-8')
+            out = subprocess.run([sys.executable, str(install.ROOT / 'tools' / 'cost_report.py'), '--root', tmp],
+                                 capture_output=True, text=True, check=True).stdout
+        self.assertIn('last 7 days: $4.00', out)
+        self.assertIn('Advisor calls: 1, $1.50 at list prices', out)
+        self.assertIn('main chat on opus 1', out)
 
 
 FAKE_OPENCODE = '''

@@ -6,6 +6,8 @@ token kind (cache reads, cache writes, output, uncached input), so you can see
 which rule in CLAUDE.md would save the most. A handoff section shows what
 delegating costs: main-chat vs agent turn price, main-chat turns spent reacting
 to agent reports, and how much of each agent's spend comes before its first edit.
+Advisor calls are listed apart: their tokens are not in a message's own totals,
+and whether they are billed depends on the plan.
 
   python tools/cost_report.py            # last 7 days
   python tools/cost_report.py --days 30
@@ -101,6 +103,7 @@ def main():
                                               'agent report': 0.0})
     by_model = collections.Counter()
     unpriced = collections.Counter()
+    advisor = collections.defaultdict(lambda: [0, 0.0])  # (who, caller's model): calls, cost at list prices
 
     def add(who, path):
         if os.path.getmtime(path) < since:
@@ -112,6 +115,12 @@ def main():
         g['runs'] += 1
         run, pre = 0.0, 0.0
         for model, u, trigger, before_edit in turns:
+            for part in u.get('iterations') or []:  # an advisor's read is not in the message's own totals
+                asked = cost(str(part.get('model', '')), part) if part.get('type') == 'advisor_message' else None
+                if asked:
+                    calls = advisor[(who, next((k for k in PRICES if k in model), model))]
+                    calls[0] += 1
+                    calls[1] += sum(asked.values())
             c = cost(model, u)
             if c is None:
                 if not model.startswith('<'):  # '<synthetic>' marks local, unbilled messages
@@ -153,6 +162,11 @@ def main():
         print(f'{who:18}{g["runs"]:6}{g["turns"]:8}{g["cost"]:10.2f}{100 * g["cost"] / total:5.0f}{g["cost"] / g["turns"]:8.3f}   '
               + '  '.join(f'{100 * g[k] / g["cost"]:10.0f}%' for k in KINDS))
     print('\nBy model: ' + ', '.join(f'{m} ${v:,.2f} ({100 * v / total:.0f}%)' for m, v in by_model.most_common()))
+    if advisor:
+        calls, spent = (sum(v[n] for v in advisor.values()) for n in (0, 1))
+        print(f'Advisor calls: {calls}, ${spent:,.2f} at list prices if they are billed (${spent / calls:.2f} a call); '
+              'not in the totals above. By caller: '
+              + ', '.join(f'{who} on {m} {v[0]}' for (who, m), v in sorted(advisor.items(), key=lambda x: -x[1][0])))
 
     # Handoffs: what delegating costs beyond the work itself (CLAUDE.md "Delegation").
     main = by_who.get('main chat')

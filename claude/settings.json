@@ -1,6 +1,7 @@
 {
   "bashOutputMaxChars": 12000,
   "effortLevel": "high",
+  "advisorModel": "fable",
   "env": {
     "CLAUDE_CODE_SUBAGENT_MODEL": "opus"
   },
