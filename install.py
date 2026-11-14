@@ -78,13 +78,25 @@ def clean_claude(config):
         config.pop('skillOverrides', None)
 
 
+# event, matcher, script, its arguments
+HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
+         ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
+         ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)))
+
+
 def set_hooks(config):
-    """Add this setup's hook to settings, replacing an earlier entry for the same script."""
-    script = HOME / 'hooks' / 'read_streak.py'
-    entry = {'hooks': [{'type': 'command', 'command': Path(sys.executable).as_posix(),
-                        'args': [script.as_posix()], 'timeout': 10}]}
-    groups = config.setdefault('hooks', {}).setdefault('PostToolBatch', [])
-    groups[:] = [g for g in groups if script.name not in json.dumps(g)] + [entry]
+    """Add this setup's hooks to settings, replacing earlier entries for the same scripts."""
+    for event, matcher, name, args in HOOKS:
+        script = HOME / 'hooks' / name
+        entry = {'hooks': [{'type': 'command', 'command': Path(sys.executable).as_posix(),
+                            'args': [script.as_posix(), *args], 'timeout': 20 if args else 10}]}
+        if matcher:
+            entry = {'matcher': matcher, **entry}
+        groups = config.setdefault('hooks', {}).setdefault(event, [])
+        for group in groups:  # our earlier entry goes; a user's hook that shares its group stays
+            if isinstance(group.get('hooks'), list):
+                group['hooks'] = [hook for hook in group['hooks'] if name not in json.dumps(hook)]
+        groups[:] = [g for g in groups if g.get('hooks') != []] + [entry]
 
 
 def clean_opencode(config):

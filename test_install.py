@@ -51,6 +51,14 @@ class InstallerTests(unittest.TestCase):
                                            'custom': {'model': 'user/model'}})
         self.assertEqual(config['permissions'], [{'effect': 'allow', 'action': 'read'}])
 
+    def test_a_users_hook_that_shares_a_group_with_ours_is_kept(self):
+        config = {'hooks': {'PreToolUse': [{'matcher': 'Bash|PowerShell', 'hooks': [
+            {'type': 'command', 'command': 'python', 'args': ['old/review_gate.py', 'push']}, {'type': 'command', 'command': 'mine'}]}]}}
+        install.set_hooks(config)
+        groups = config['hooks']['PreToolUse']
+        self.assertEqual([[hook['command'] for hook in group['hooks']] for group in groups][0], ['mine'])
+        self.assertEqual((len(groups), groups[1]['hooks'][0]['args'][1]), (2, 'push'))
+
     def test_install_migration_backups_dry_run_and_idempotency(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             root = Path(tmp)
@@ -96,6 +104,12 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual([g['hooks'][0]['args'] for g in batch[1:]], [[script.as_posix()]])
                 self.assertEqual(settings['env'], {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus'})
                 self.assertEqual(settings['advisorModel'], 'fable')
+                gate = (home / 'hooks' / 'review_gate.py').as_posix()
+                self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['PreToolUse']],
+                                 [('Bash|PowerShell', [gate, 'push'])])
+                self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['SubagentStop']],
+                                 [('reviewer', [gate, 'reviewed'])])
+                self.assertTrue((agents / 'reviewer.md').exists())
                 self.assertEqual((home / 'tools' / 'deepseek.py').read_bytes(),
                                  (install.REPO / 'tools' / 'deepseek.py').read_bytes())
                 self.assertEqual(settings['permissions'], {'allow': ['Read']})
@@ -196,6 +210,165 @@ class ReadStreakHookTests(unittest.TestCase):
         self.assertEqual([self.turn(('Read', '')) for _ in range(4)], [None] * 4)
         done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'read_streak.py')], input='not json',
                               capture_output=True, text=True, env=self.env)
+        self.assertEqual((done.returncode, done.stdout), (0, ''))
+
+
+class ReviewGateTests(unittest.TestCase):
+    GATE = install.REPO / 'hooks' / 'review_gate.py'
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.repo = self.root / 'work'
+        self.env = {**os.environ, 'TMPDIR': tmp.name, 'TEMP': tmp.name, 'TMP': tmp.name,
+                    'CLAUDE_REVIEW_LOG': str(self.root / 'gate.log'), 'GIT_CONFIG_GLOBAL': os.devnull,
+                    'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+                    'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
+        self.env.pop('CLAUDE_REVIEW_MIN_LINES', None)
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.root / 'origin.git')], check=True, env=self.env)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.repo)], check=True, env=self.env)
+        self.git('remote', 'add', 'origin', str(self.root / 'origin.git'))
+        self.write('a.rs', 1)
+        self.commit('start')
+        self.git('push', '-q', 'origin', 'HEAD:main')
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', str(self.repo), *args], check=True, env=self.env, capture_output=True, text=True).stdout
+
+    def write(self, name, lines, mark='x'):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(''.join(f'{mark} {n}\n' for n in range(lines)), encoding='utf-8')
+
+    def commit(self, message):
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', message)
+
+    def hook(self, mode, **event):
+        done = subprocess.run([sys.executable, str(self.GATE), mode], input=json.dumps({'cwd': str(self.repo), **event}),
+                              capture_output=True, text=True, env=self.env)
+        self.assertEqual((done.returncode, done.stderr), (0, ''))
+        return json.loads(done.stdout)['hookSpecificOutput']['permissionDecisionReason'] if done.stdout else None
+
+    def push(self, command='git push origin HEAD:main', **event):
+        return self.hook('push', tool_name='PowerShell', tool_input={'command': command}, **event)
+
+    def decisions(self):
+        log = self.root / 'gate.log'
+        return [json.loads(line)['decision'] for line in log.read_text(encoding='utf-8').splitlines()] if log.exists() else []
+
+    def test_small_changes_prose_and_other_branches_pass(self):
+        self.write('a.rs', 40)
+        self.write('docs/guide.md', 900)
+        self.write('app/src/main/res/values-de/strings.xml', 400)
+        self.commit('small')
+        self.assertIsNone(self.push())
+        self.write('b.rs', 300)
+        self.commit('large')
+        self.assertIsNone(self.push('git push origin HEAD:refs/heads/topic'))
+        self.assertIsNone(self.push('git push --dry-run origin HEAD:main'))
+        self.assertIsNone(self.push('git status; echo push main'))
+        self.assertEqual(self.decisions(), [])
+
+    def test_a_large_unreviewed_push_is_held_until_the_reviewer_ran(self):
+        self.write('b.rs', 300)
+        self.commit('large')
+        held = self.push()
+        self.assertIn('300 changed code lines in 1 files', held)
+        self.assertIn('`reviewer` agent', held)
+        self.assertIn('# REVIEW_SKIP=<reason>', held)
+        self.assertIn('report this to the agent that sent you', self.push(agent_type='runner'))
+        self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message='Clean.\nReviewed: ' + str(self.repo)))
+        self.assertIsNone(self.push())
+        self.write('b.rs', 300, mark='y')  # fixes after the review: every line of b.rs changes, 100 more added
+        self.write('c.rs', 100)
+        self.commit('fixes')
+        self.assertIsNone(self.push())
+        self.write('d.rs', 200)
+        self.commit('more')
+        self.assertIn('came after the last review', self.push())
+        self.assertEqual(self.decisions(), ['held', 'held', 'review ran', 'reviewed', 'reviewed', 'held'])
+
+    def test_a_review_of_uncommitted_work_counts_and_is_spent_once_it_landed(self):
+        self.write('b.rs', 200)
+        self.write('new/c.rs', 90)  # not yet added to git
+        self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Low: a.\n\nReviewed: `{self.repo}`\n'))
+        self.commit('reviewed work')
+        self.assertIsNone(self.push())
+        self.git('push', '-q', 'origin', 'HEAD:main')
+        self.write('b.rs', 200, mark='z')
+        self.commit('the next task, in the same file')
+        self.assertIn('no independent review has seen', self.push())
+
+    def test_a_review_that_did_not_finish_or_saw_little_unlocks_nothing(self):
+        self.write('b.rs', 100)
+        self.commit('large')
+        self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message='Interrupted before the report.'))
+        self.assertIn('no independent review has seen', self.push())
+        self.git('reset', '-q', '--hard', 'origin/main')
+        self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))  # a clean tree
+        self.write('b.rs', 100)
+        self.commit('written after the review')
+        self.assertIn('100 changed code lines came after the last review', self.push())
+        self.git('reset', '-q', '--hard', 'origin/main')
+        self.write('b.rs', 30)
+        self.write('c.rs', 20)
+        self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))  # 50 lines seen
+        self.write('c.rs', 90)
+        self.commit('more than was reviewed')
+        self.assertIn('70 changed code lines came after the last review', self.push())
+        self.assertEqual(self.decisions(), ['review not counted', 'held', 'review ran', 'held', 'review ran', 'held'])
+
+    def test_the_push_is_judged_in_the_checkout_the_command_names(self):
+        self.write('b.rs', 300)
+        self.commit('large')
+        elsewhere = {'cwd': str(self.root)}
+        for command in (f'Set-Location {self.repo}; git add -A; git push origin HEAD:main', f'cd "{self.repo}" && git push origin main',
+                        f'git -C "{self.repo}" push origin HEAD:main', f"git -C '{self.repo}' push"):
+            self.assertIsNotNone(self.push(command, **elsewhere), command)
+        self.assertIsNone(self.push(**elsewhere))
+        self.assertIsNotNone(self.push('cd work && git push origin HEAD:main', **elsewhere))
+        self.assertIsNotNone(self.push('Set-Location $unknown; git push origin HEAD:main'))
+        if os.name == 'nt':  # Git Bash writes C:\x as /c/x
+            bash = '/' + self.repo.drive[0].lower() + self.repo.as_posix()[2:]
+            self.assertIsNotNone(self.push(f'cd {bash} && git push origin HEAD:main', **elsewhere))
+            self.assertIsNotNone(self.push(f'git -C {bash} push origin HEAD:main', **elsewhere))
+            self.git('reset', '-q', '--hard', 'origin/main')
+            self.write('b.rs', 300)
+            self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message='Reviewed: ' + bash, **elsewhere))
+            self.commit('large')
+            self.assertIsNone(self.push())
+
+    def test_what_counts_as_a_push_to_main(self):
+        self.write('b.rs', 300)
+        self.commit('large')
+        for command in ('git --no-pager push origin HEAD:main', 'git push origin HEAD', 'git push origin main --tags',
+                        'git push -u origin +HEAD:refs/heads/main 2>&1', 'GIT_TRACE=1 git push origin HEAD:main',
+                        'if true; then git push origin HEAD:main; fi', 'git add -A; if ($?) { git push origin "HEAD:main" }'):
+            self.assertIsNotNone(self.push(command), command)
+        for command in ('git push origin HEAD:feature/main', 'git push origin main:topic', 'git push --tags', 'git push origin v1.2.0',
+                        "git commit -F - <<'EOF'\nfix: x\n\nNext: run git push origin HEAD:main once CI is green.\nEOF",
+                        'git commit -m "docs: say when to git push origin HEAD:main"',
+                        'git push origin HEAD:main', ):
+            if command == 'git push origin HEAD:main':
+                self.hook('reviewed', agent_type='scout', last_assistant_message=f'Reviewed: {self.repo}')  # not the reviewer
+                self.assertIsNotNone(self.push(command))
+            else:
+                self.assertIsNone(self.push(command), command)
+
+    def test_a_skip_is_logged_and_zero_turns_the_gate_off(self):
+        self.write('b.rs', 300)
+        self.commit('large')
+        self.assertIsNone(self.push("$env:REVIEW_SKIP='user wants it out now'; git push origin HEAD:main"))
+        entry = json.loads((self.root / 'gate.log').read_text(encoding='utf-8'))
+        self.assertEqual((entry['decision'], entry['reason'], entry['lines']), ('skipped', 'user wants it out now', 300))
+        self.assertIsNone(self.push('git push origin HEAD:main  # REVIEW_SKIP=release fix, user said ship'))
+        self.assertEqual(json.loads((self.root / 'gate.log').read_text(encoding='utf-8').splitlines()[1])['reason'],
+                         'release fix, user said ship')
+        self.env['CLAUDE_REVIEW_MIN_LINES'] = '0'
+        self.assertIsNone(self.push())
+        done = subprocess.run([sys.executable, str(self.GATE), 'push'], input='not json', capture_output=True, text=True, env=self.env)
         self.assertEqual((done.returncode, done.stdout), (0, ''))
 
 
