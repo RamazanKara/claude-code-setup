@@ -51,6 +51,7 @@ Edit templates here before reinstalling. Keep machine-specific paths in `~/.clau
 - `test_install.py`: installer migration, backup and repeat-install checks, and the behaviour of the hooks, the DeepSeek tool and the task tool (`python -m unittest -v`).
 - `tools/cost_report.py`: optional historical transcript analysis, with advisor calls listed apart; it does not control the workflow.
 - `tools/context_fill.py`: what fills Claude Code contexts (tool results by tool, shell output by command kind) and where the turns go (tool calls per turn, spend in read-only streaks).
+- `tools/user_messages.py`: the messages you typed, one per line, to find where the agents cost you corrections.
 - `tools/opencode_cost.py`: where OpenCode's Anthropic spend goes: cost split, context sizes, what fills the context, and the 5-minute vs 1-hour cache trade-off.
 
 ## License
