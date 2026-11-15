@@ -230,6 +230,9 @@ class FreshCheckoutTests(unittest.TestCase):
         self.env = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
                     'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
         self.env.pop('CLAUDE_FRESH_CHECKOUT', None)
+        self.sessions = self.root / 'config' / 'sessions'
+        self.sessions.mkdir(parents=True)
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.root / 'config')
         subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.root / 'origin.git')], check=True, env=self.env)
         self.other, self.repo = self.root / 'other', self.root / 'work'
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.other)], check=True, env=self.env)
@@ -256,6 +259,9 @@ class FreshCheckoutTests(unittest.TestCase):
     def rule(self):
         return (self.repo / 'AGENTS.md').read_text(encoding='utf-8')
 
+    def session(self, pid, cwd, sid='other'):
+        (self.sessions / f'{pid}.json').write_text(json.dumps({'pid': pid, 'cwd': str(cwd), 'sessionId': sid}), encoding='utf-8')
+
     def test_a_clean_main_behind_is_fast_forwarded_and_untracked_files_stay(self):
         self.assertIsNone(self.hook())  # up to date: silent
         self.land('AGENTS.md', 'new rule\n')
@@ -281,6 +287,56 @@ class FreshCheckoutTests(unittest.TestCase):
         (Path(self.git(self.repo, 'rev-parse', '--absolute-git-dir').strip()) / 'rebase-merge').mkdir()
         self.assertIn('because a merge, rebase or cherry-pick is under way', self.hook())
         self.assertEqual(self.rule(), 'old rule\n')
+
+    def test_another_live_session_in_the_checkout_keeps_it_still_and_names_the_new_rules(self):
+        self.land('AGENTS.md', 'new rule\n')
+        gone = subprocess.Popen([sys.executable, '-c', 'pass'])
+        gone.wait()
+        self.session(gone.pid, self.repo)  # a session that ended does not count
+        live = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.addCleanup(live.wait)
+        self.addCleanup(live.kill)
+        self.session(live.pid, self.repo / 'sub', 'mine')
+        self.assertIn('fast-forwarded', self.hook(session_id='mine'))  # its own entry is no other session
+        self.land('AGENTS.md', 'newer rule\n')
+        self.session(live.pid, self.repo / 'sub')
+        said = self.hook(session_id='mine')
+        self.assertIn('was left as it is because 1 other live session works in it', said)
+        self.assertIn('Rule files changed upstream: AGENTS.md', said)
+        self.assertEqual(self.rule(), 'new rule\n')
+        self.session(live.pid, self.root / 'elsewhere')  # a session in another folder does not count
+        self.assertIn('fast-forwarded', self.hook(session_id='mine'))
+        self.land('AGENTS.md', 'newest rule\n')
+        shutil.rmtree(self.sessions)
+        self.assertIn('because live sessions could not be listed', self.hook())
+
+    def test_an_ignored_file_upstream_now_tracks_is_never_overwritten(self):
+        (self.repo / '.git' / 'info' / 'exclude').write_text('local.cfg\n', encoding='utf-8')
+        (self.repo / 'local.cfg').write_text('MINE\n', encoding='utf-8')
+        self.land('local.cfg', 'upstream\n')
+        self.assertIn('the fast-forward failed.', self.hook())
+        self.assertEqual((self.repo / 'local.cfg').read_text(encoding='utf-8'), 'MINE\n')
+
+    def test_a_moved_submodule_is_named_and_does_not_stop_later_updates(self):
+        allow = ('-c', 'protocol.file.allow=always')
+        lib = self.root / 'lib'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(lib)], check=True, env=self.env)
+        for n in (1, 2):
+            (lib / 'x.c').write_text(f'{n}\n', encoding='utf-8')
+            self.git(lib, 'add', '-A')
+            self.git(lib, 'commit', '-q', '-m', str(n))
+        self.git(self.other, *allow, 'submodule', 'add', '-q', str(lib), 'lib')
+        self.git(self.other, 'commit', '-q', '-m', 'lib')
+        self.git(self.other, 'push', '-q', 'origin', 'HEAD:main')
+        self.assertIn('Submodules moved and were not updated: lib', self.hook())
+        self.git(self.repo, *allow, 'submodule', 'update', '-q', '--init')
+        self.git(self.other / 'lib', 'checkout', '-q', 'HEAD~1')
+        self.git(self.other, 'commit', '-q', '-am', 'lib back')
+        self.git(self.other, 'push', '-q', 'origin', 'HEAD:main')
+        self.assertIn('Submodules moved and were not updated: lib', self.hook())
+        self.land('AGENTS.md', 'new rule\n')  # the submodule left at its old commit is no edit
+        self.assertIn('fast-forwarded', self.hook())
+        self.assertEqual(self.rule(), 'new rule\n')
 
     def test_other_branches_compaction_and_the_switch_stay_silent(self):
         self.land('AGENTS.md', 'new rule\n')
