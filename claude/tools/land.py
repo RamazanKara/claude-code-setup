@@ -31,7 +31,7 @@ or still running, 2 rebase failed (aborted, the checkout is as it was), 3 --chec
 import argparse, json, os, re, subprocess, sys, tempfile, time
 
 GATE = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'hooks', 'review_gate.py')
-ENV = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never', 'GIT_ASKPASS': '', 'SSH_ASKPASS': ''}
+ENV = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
 TRIES = 3
 PENDING = 'land-check-pending'  # in the git dir: a rebase's check has not passed yet
 REFSPEC = '+refs/heads/main:refs/remotes/origin/main'  # explicit, so a narrow clone refspec still updates origin/main
@@ -178,10 +178,15 @@ def land(args):
         upstream = git(top, 'rev-parse', 'origin/main')
         before = git(top, 'rev-parse', 'HEAD')
         if git(top, 'merge-base', 'HEAD', 'origin/main') != upstream:
+            owed = os.path.exists(pending)
+            if args.check:
+                open(pending, 'w').close()  # before the rebase: a run killed during it still owes the check
             code, out = run(['git', '-C', top, 'rebase', '--no-autostash', '--quiet', 'origin/main'], timeout=600)
             if code != 0:
                 conflicts = git(top, 'diff', '--name-only', '--diff-filter=U') or ''
                 git(top, 'rebase', '--abort')
+                if not owed:
+                    clear(pending)
                 what = 'stopped on a conflict in' if conflicts else 'failed'
                 say(f'rebase onto origin/main {what}; aborted, the checkout is as it was.\n{conflicts or tail(out, 10)}')
                 return 2
@@ -191,8 +196,6 @@ def land(args):
                 say('nothing to land: the rebase found every commit already on origin/main')
                 return 0
             say(f'rebased {ahead} commit{"s" if ahead > 1 else ""} onto origin/main {upstream[:9]}')
-            if args.check:
-                open(pending, 'w').close()
             stale = follow_submodules(top, before)
             if stale:
                 say(stale)
@@ -247,25 +250,28 @@ def follow_submodules(top, before):
         meta, _, path = line.partition('\t')
         fields = meta.split()
         if len(fields) >= 4 and fields[1] == '160000' and fields[0] == ':160000':
-            moved.append((path, fields[2]))
+            moved.append((path, fields[2], fields[3]))
     stale = []
-    for path, old in moved:
+    for path, old, new in moved:
         inside = os.path.join(top, path)
         if not os.path.exists(os.path.join(inside, '.git')):
             continue  # not checked out here: nothing goes stale
         if git(inside, 'rev-parse', 'HEAD') != old:
             stale.append(f'{path} (it was not at the commit the old HEAD named, so land.py left it)')
             continue
-        code, out = run(['git', '-C', top, 'submodule', 'update', '--recursive', '--', path], timeout=600)
+        # --checkout: a configured `update = none` or merge mode would leave it stale while reporting success.
+        code, out = run(['git', '-C', top, 'submodule', 'update', '--checkout', '--recursive', '--', path], timeout=600)
         if code != 0:
             stale.append(f'{path} (git submodule update failed: {tail(out, 3)})')
+        elif git(inside, 'rev-parse', 'HEAD') != new:
+            stale.append(f'{path} (git submodule update left it off the new pointer)')
         else:
             say(f'submodule {path} follows the rebase')
     if not stale:
         return None
     return ('the rebase moved submodule pointers that land.py did not bring along: ' + '; '.join(stale) +
             '. Never commit the old pointer back. Run `git submodule update --recursive -- <path>` once it is safe, then '
-            'land.py again, which checks first')
+            'land.py again (given --check, it checks first)')
 
 
 def runs(top, sha):
