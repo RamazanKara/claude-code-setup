@@ -514,6 +514,54 @@ class LandToolTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(self.main_sha(), self.git(wt, 'rev-parse', 'HEAD'))
 
+    def test_a_failed_check_is_owed_until_one_passes(self):
+        self.put(self.repo, 'b.rs', 'fn b() {}\n')
+        self.upstream('e.rs', 'fn e() {}\n')
+        before = self.main_sha()
+        self.assertEqual(self.land('--check', 'exit 7')[0], 3)
+        code, out = self.land()  # main has not moved since, but the failed check is still owed
+        self.assertEqual(code, 3, out)
+        self.assertIn('a check is owed', out)
+        code, out = self.land('--check', 'exit 7')
+        self.assertEqual(code, 3, out)
+        self.assertEqual(self.main_sha(), before)
+        code, out = self.land('--check', 'exit 0')
+        self.assertEqual(code, 0, out)
+        self.assertIn('running the check', out)
+        self.put(self.repo, 'c.rs', 'fn c() {}\n')
+        self.assertNotIn('running the check', self.land('--check', 'exit 7')[1])  # paid: no check until main moves again
+
+    def test_a_rebase_without_a_check_lands_and_a_helper_is_told_to_report_a_hold(self):
+        self.put(self.repo, 'b.rs', 'fn b() {}\n')
+        self.upstream('e.rs', 'fn e() {}\n')
+        self.assertEqual(self.land()[0], 0)
+        self.put(self.repo, 'big.rs', ''.join(f'let v{n} = {n};\n' for n in range(300)))
+        code, out = self.land('--agent', 'runner')
+        self.assertEqual(code, 4, out)
+        self.assertIn('report this to the agent that sent you', out)
+
+    def test_a_submodule_moved_by_the_rebase_follows_it(self):
+        self.env.update({'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'protocol.file.allow', 'GIT_CONFIG_VALUE_0': 'always'})
+        lib = self.root / 'lib'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(lib)], check=True, env=self.env)
+        self.put(lib, 'x.txt', 'one\n')
+        self.git(self.other, 'pull', '-q', '--rebase', 'origin', 'main')
+        self.git(self.other, 'submodule', 'add', '-q', str(lib), 'lib')
+        self.git(self.other, 'commit', '-q', '-m', 'add lib')
+        self.git(self.other, 'push', '-q', 'origin', 'HEAD:main')
+        self.git(self.repo, 'pull', '-q', '--rebase', 'origin', 'main')
+        self.git(self.repo, 'submodule', 'update', '-q', '--init')
+        self.put(self.repo, 'b.rs', 'fn b() {}\n')
+        self.put(lib, 'x.txt', 'two\n')
+        self.git(self.other / 'lib', 'pull', '-q', 'origin', 'main')
+        self.git(self.other, 'commit', '-q', '-am', 'bump lib')
+        self.git(self.other, 'push', '-q', 'origin', 'HEAD:main')
+        code, out = self.land()
+        self.assertEqual(code, 0, out)
+        self.assertIn('submodule lib follows the rebase', out)
+        self.assertEqual(self.git(self.repo / 'lib', 'rev-parse', 'HEAD'), self.git(lib, 'rev-parse', 'HEAD'))
+        self.assertEqual(self.git(self.repo, 'status', '--porcelain'), '')
+
     def test_main_moving_during_the_push_is_fetched_rebased_and_pushed_again(self):
         hook = self.repo / '.git' / 'hooks' / 'pre-push'
         once = self.root / 'raced'

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Land the commits of a checkout on the remote's main in one call, and optionally wait for their CI.
 
-  python land.py [--repo <checkout>] [--check "<command>"] [--skip "<reason>"] [--watch]
+  python land.py [--repo <checkout>] [--check "<command>"] [--skip "<reason>"] [--watch] [--agent <type>]
   python land.py --ci <sha> [--repo <checkout>]          # wait for that commit's CI only
 
 In order: fetch origin/main; stop when the checkout has nothing beyond it; rebase onto it (never with a
@@ -9,26 +9,33 @@ stash: tracked edits must be committed first, untracked files and edits inside s
 the rebase brought in other people's commits, run --check in the checkout (PowerShell on Windows, sh
 elsewhere) and stop if it fails; ask the review gate about the exact commit; push that commit to main.
 When main moved again before the push lands, it fetches, rebases and asks again, three times at most.
-It never force-pushes, and works from a branch or a detached HEAD alike.
+It never force-pushes, and works from a branch or a detached HEAD alike. A check that failed or was cut
+off leaves the checkout rebased, and every later run checks again until one passes. Submodules the
+rebase moved are brought along when they sat at the old commit; a submodule land.py leaves stale is named.
 
 The review gate (`hooks/review_gate.py` beside this folder) is the same judgement its PreToolUse hook
 gives a `git push` in Claude Code, and writes the same log line. This command has no `git push` in its
 text, so the hook itself never sees it; this tool asks instead. A gate that cannot be run holds the push.
 --skip "<reason>" is the logged way past it, for a change the user wants out at once. Outside Claude Code
 (no CLAUDECODE=1) there is no reviewer agent to satisfy it, so the gate is not asked and the output says so.
+A helper agent passes --agent <its type> (runner, scout, mechanic) so a hold tells it to report back.
 
 --watch then waits for every CI run of the pushed commit (one look a minute, as GitHub's rate limits ask),
 reports each, and prints the tail of a failed job's log. A run can take longer than a foreground tool call
 allows: run it in the background. `cancelled` usually means a later push to main superseded the run.
 
-Exit codes: 0 landed (or nothing to land), 1 usage or checkout problem, 2 rebase conflict (aborted, the
-checkout is as it was), 3 --check failed, 4 held by the review gate, 5 push failed, 6 CI failed.
+Exit codes: 0 landed (or nothing to land), 1 usage or checkout problem, or CI not readable, not started
+or still running, 2 rebase failed (aborted, the checkout is as it was), 3 --check failed or is still owed,
+4 held by the review gate, 5 fetch or push failed, 6 CI failed.
 """
 import argparse, json, os, re, subprocess, sys, tempfile, time
 
 GATE = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'hooks', 'review_gate.py')
-ENV = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
+ENV = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never', 'GIT_ASKPASS': '', 'SSH_ASKPASS': ''}
 TRIES = 3
+PENDING = 'land-check-pending'  # in the git dir: a rebase's check has not passed yet
+REFSPEC = '+refs/heads/main:refs/remotes/origin/main'  # explicit, so a narrow clone refspec still updates origin/main
+RACE = re.compile(r'\[rejected\][^\n]*\((?:fetch first|non-fast-forward)\)|cannot lock ref|incorrect old value')
 
 
 def say(text):
@@ -74,6 +81,12 @@ def git(top, *args, timeout=60):
     return out if code == 0 else None
 
 
+def fetch(top):
+    """None when origin/main is fresh, else git's own words."""
+    code, out = run(['git', '-C', top, 'fetch', '--quiet', '--no-tags', 'origin', REFSPEC], timeout=120)
+    return None if code == 0 else (tail(out, 6) or f'git fetch exit {code}')
+
+
 def tail(text, lines=15):
     return '\n'.join(text.splitlines()[-lines:])
 
@@ -85,7 +98,7 @@ def local(path):
     return os.path.abspath(os.path.expanduser(path))
 
 
-def gate(top, sha, skip):
+def gate(top, sha, skip, agent=None):
     """None when the push may go, else why it is held."""
     if os.environ.get('CLAUDECODE') != '1':
         say('review gate not asked: outside Claude Code there is no reviewer agent to satisfy it')
@@ -94,6 +107,8 @@ def gate(top, sha, skip):
         return f'the review gate is missing ({GATE}), so nothing can judge this push; reinstall claude-code-setup'
     command = f'git push origin {sha}:main' + (f' # REVIEW_SKIP={skip}' if skip else '')
     event = {'cwd': top, 'tool_name': 'Bash', 'tool_input': {'command': command}, 'hook_event_name': 'PreToolUse'}
+    if agent:
+        event['agent_type'] = agent
     code, out = run([sys.executable, GATE, 'push'], stdin=json.dumps(event), timeout=90)
     if code != 0:
         return f'the review gate could not judge this push (exit {code}): {tail(out, 5)}'
@@ -126,59 +141,131 @@ def land(args):
     if git(top, 'remote', 'get-url', 'origin') is None:
         say('no remote named origin')
         return 1
-    gitdir = git(top, 'rev-parse', '--absolute-git-dir') or ''
+    gitdir = git(top, 'rev-parse', '--absolute-git-dir')
+    if not gitdir:
+        say('cannot find the git folder of this checkout')
+        return 1
     if any(os.path.exists(os.path.join(gitdir, n)) for n in ('rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD')):
         say('a rebase, merge or cherry-pick is under way here: finish or abort it first')
         return 1
-    dirty = git(top, 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=dirty')
-    if dirty is None or dirty:
-        say('tracked files have uncommitted edits: commit what lands, and keep other work out of this checkout '
-            '(land.py never stashes)\n' + tail(dirty or '', 10))
+    # Submodule pointers do not count: rebase ignores them too, and a stale submodule is not an edit to commit.
+    dirty = git(top, 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all')
+    if dirty is None:
+        say('git status failed in this checkout')
         return 1
+    if dirty:
+        say('tracked files have uncommitted edits: commit what lands, and keep other work out of this checkout '
+            '(land.py never stashes)\n' + tail(dirty, 10))
+        return 1
+    if not ({'GIT_SSH_COMMAND', 'GIT_SSH'} & set(ENV)) and not git(top, 'config', 'core.sshCommand'):
+        ENV['GIT_SSH_COMMAND'] = 'ssh -o BatchMode=yes'  # no prompt; a user's own ssh setting wins
+    pending = os.path.join(gitdir, PENDING)
+    out = ''
     for attempt in range(1, TRIES + 1):
-        if git(top, 'fetch', '--quiet', '--no-tags', 'origin', 'main', timeout=120) is None:
-            say('fetching origin main failed')
+        failed = fetch(top)
+        if failed:
+            say('fetching origin main failed\n' + failed)
             return 5
-        ahead = int(git(top, 'rev-list', '--count', 'origin/main..HEAD') or 0)
+        count = git(top, 'rev-list', '--count', 'origin/main..HEAD')
+        if count is None:
+            say('cannot compare HEAD with origin/main')
+            return 1
+        ahead = int(count)
         if not ahead:
+            clear(pending)
             say('nothing to land: HEAD has no commits beyond origin/main')
             return 0
         upstream = git(top, 'rev-parse', 'origin/main')
-        moved = git(top, 'merge-base', 'HEAD', 'origin/main') != upstream
-        if moved:
+        before = git(top, 'rev-parse', 'HEAD')
+        if git(top, 'merge-base', 'HEAD', 'origin/main') != upstream:
             code, out = run(['git', '-C', top, 'rebase', '--no-autostash', '--quiet', 'origin/main'], timeout=600)
             if code != 0:
                 conflicts = git(top, 'diff', '--name-only', '--diff-filter=U') or ''
                 git(top, 'rebase', '--abort')
-                say(f'rebase onto origin/main stopped on a conflict; aborted, the checkout is as it was.\n'
-                    f'{conflicts or tail(out, 10)}')
+                what = 'stopped on a conflict in' if conflicts else 'failed'
+                say(f'rebase onto origin/main {what}; aborted, the checkout is as it was.\n{conflicts or tail(out, 10)}')
                 return 2
+            ahead = int(git(top, 'rev-list', '--count', 'origin/main..HEAD') or 0)
+            if not ahead:
+                clear(pending)
+                say('nothing to land: the rebase found every commit already on origin/main')
+                return 0
             say(f'rebased {ahead} commit{"s" if ahead > 1 else ""} onto origin/main {upstream[:9]}')
             if args.check:
-                say(f'main moved, so running the check: {args.check}')
-                ok, out = check(top, args.check)
-                if not ok:
-                    say('check failed; nothing was pushed\n' + tail(out, 30))
-                    return 3
+                open(pending, 'w').close()
+            stale = follow_submodules(top, before)
+            if stale:
+                say(stale)
+                return 1
+        if os.path.exists(pending):
+            if not args.check:
+                say('a check is owed: an earlier run rebased onto a moved main and its check failed or was cut off. '
+                    'Run land.py again with --check "<the affected checks>"; nothing was pushed')
+                return 3
+            say(f'main moved, so running the check: {args.check}')
+            ok, out = check(top, args.check)
+            if not ok:
+                say(f'check failed; nothing was pushed. The checkout stays rebased onto origin/main {upstream[:9]}; '
+                    'fix and commit, then run land.py again, which checks again first\n' + tail(out, 30))
+                return 3
+            clear(pending)
         sha = git(top, 'rev-parse', 'HEAD')
-        held = gate(top, sha, args.skip)
+        held = gate(top, sha, args.skip, args.agent)
         if held:
             say('held by the review gate; nothing was pushed\n' + held)
             return 4
         code, out = run(['git', '-C', top, 'push', '--quiet', 'origin', f'{sha}:refs/heads/main'], timeout=180)
-        fetched = git(top, 'fetch', '--quiet', '--no-tags', 'origin', 'main', timeout=120) is not None
-        now = git(top, 'rev-parse', 'origin/main') if fetched else None
+        failed = fetch(top)
+        now = None if failed else git(top, 'rev-parse', 'origin/main')
         if now and git(top, 'merge-base', '--is-ancestor', sha, now) is not None:
             files = git(top, 'diff', '--name-only', f'{upstream}..{sha}') or ''
             say(f'landed {sha[:9]} on main ({ahead} commit{"s" if ahead > 1 else ""}, {len(files.splitlines())} files)')
             return watch(top, sha, args.timeout) if args.watch else 0
-        if now and now != upstream:
+        if code == 0:
+            say(f'git reported the push of {sha[:9]} as done, but fetching main to confirm it failed\n{failed or ""}')
+            return watch(top, sha, args.timeout) if args.watch else 0
+        if now and now != upstream and RACE.search(out):
             say(f'main moved during the push (attempt {attempt} of {TRIES}); fetching and rebasing again')
             continue
-        say('push failed\n' + tail(out, 15))
+        say('push failed; nothing landed\n' + tail(out, 15))
         return 5
-    say(f'main kept moving; gave up after {TRIES} attempts. Run land.py again.')
+    say(f'main kept moving; gave up after {TRIES} attempts. Run land.py again. The last push said:\n' + tail(out, 8))
     return 5
+
+
+def clear(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def follow_submodules(top, before):
+    """Bring along each submodule whose pointer the rebase moved, when it sat at the old commit; else say which is stale."""
+    moved = []
+    for line in (git(top, 'diff', '--raw', '--no-abbrev', before, 'HEAD') or '').splitlines():
+        meta, _, path = line.partition('\t')
+        fields = meta.split()
+        if len(fields) >= 4 and fields[1] == '160000' and fields[0] == ':160000':
+            moved.append((path, fields[2]))
+    stale = []
+    for path, old in moved:
+        inside = os.path.join(top, path)
+        if not os.path.exists(os.path.join(inside, '.git')):
+            continue  # not checked out here: nothing goes stale
+        if git(inside, 'rev-parse', 'HEAD') != old:
+            stale.append(f'{path} (it was not at the commit the old HEAD named, so land.py left it)')
+            continue
+        code, out = run(['git', '-C', top, 'submodule', 'update', '--recursive', '--', path], timeout=600)
+        if code != 0:
+            stale.append(f'{path} (git submodule update failed: {tail(out, 3)})')
+        else:
+            say(f'submodule {path} follows the rebase')
+    if not stale:
+        return None
+    return ('the rebase moved submodule pointers that land.py did not bring along: ' + '; '.join(stale) +
+            '. Never commit the old pointer back. Run `git submodule update --recursive -- <path>` once it is safe, then '
+            'land.py again, which checks first')
 
 
 def runs(top, sha):
@@ -194,7 +281,8 @@ def runs(top, sha):
 
 
 def watch(top, sha, minutes):
-    """Wait for every CI run of `sha`; 0 when none failed, 6 when one did, 1 when CI could not be read."""
+    """Wait for every CI run of `sha`; 0 when none failed, 6 when one did, 1 when CI could not be read, started no run
+    in four minutes, or was still running at the deadline."""
     deadline, first = time.time() + minutes * 60, time.time() + 240
     say(f'waiting for CI of {sha[:9]} (one look a minute, up to {minutes} min)')
     while True:
@@ -203,8 +291,9 @@ def watch(top, sha, minutes):
             say(f'cannot read CI with gh: {why}')
             return 1
         if not found and time.time() > first:
-            say('no CI run started for this commit (a docs-only change may start none)')
-            return 0
+            say('no CI run registered for this commit within 4 minutes, so nothing was verified: a docs-only change '
+                f'may start none, or GitHub is slow. Look again with land.py --ci {sha[:12]}')
+            return 1
         if found and all(r['status'] == 'completed' for r in found):
             break
         if time.time() > deadline:
@@ -232,6 +321,7 @@ def main():
     ap.add_argument('--watch', action='store_true', help='after the push, wait for the commit\'s CI and report it')
     ap.add_argument('--ci', metavar='SHA', help='only wait for and report the CI of this commit')
     ap.add_argument('--timeout', type=int, default=60, help='minutes to wait for CI (default 60)')
+    ap.add_argument('--agent', help='the helper agent type running this (runner, scout, mechanic), passed to the review gate')
     args = ap.parse_args()
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')

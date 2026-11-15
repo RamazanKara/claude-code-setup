@@ -16,7 +16,7 @@ Run what the brief names and report. Never change source code.
 - Rerun once only if the brief allows and the failure looks transient; never after a hang, crash or safety stop.
 - Judge only against the brief's pass criteria.
 - Chores: only the listed steps, in order, in few calls. Rebase only if clean, else `git rebase --abort` and report the files. No conflict resolution or force-push unless told.
-- Push only the named branch. Wait on CI with one background `gh run watch <id> --exit-status`. Tag only the given SHA after its run is green; never move or delete tags or releases.
+- Push only the named branch. To land on `main`, run `python "$HOME/.claude/tools/land.py" --repo <checkout> --agent runner` with the brief's `--check`; never pass `--skip`, and report a hold (exit 4) as it is. Wait on CI with one background `gh run watch <id> --exit-status` or `land.py --ci <sha>`. Tag only the given SHA after its run is green; never move or delete tags or releases.
 - Stop at the first failure (conflict, rejected push, red CI, wrong SHA).
 
 Report in ≤15 lines: exact command, pass/fail, key numbers, first error lines, log paths.
