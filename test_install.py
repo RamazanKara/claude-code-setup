@@ -233,6 +233,7 @@ class FreshCheckoutTests(unittest.TestCase):
         self.sessions = self.root / 'config' / 'sessions'
         self.sessions.mkdir(parents=True)
         self.env['CLAUDE_CONFIG_DIR'] = str(self.root / 'config')
+        self.env['USERPROFILE'] = self.env['HOME'] = str(self.root)  # a terminal session's ~/.claude/sessions
         subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.root / 'origin.git')], check=True, env=self.env)
         self.other, self.repo = self.root / 'other', self.root / 'work'
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.other)], check=True, env=self.env)
@@ -259,8 +260,10 @@ class FreshCheckoutTests(unittest.TestCase):
     def rule(self):
         return (self.repo / 'AGENTS.md').read_text(encoding='utf-8')
 
-    def session(self, pid, cwd, sid='other'):
-        (self.sessions / f'{pid}.json').write_text(json.dumps({'pid': pid, 'cwd': str(cwd), 'sessionId': sid}), encoding='utf-8')
+    def session(self, pid, cwd, sid='other', folder=None, **more):
+        folder = folder or self.sessions
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f'{pid}.json').write_text(json.dumps({'pid': pid, 'cwd': str(cwd), 'sessionId': sid, **more}), encoding='utf-8')
 
     def test_a_clean_main_behind_is_fast_forwarded_and_untracked_files_stay(self):
         self.assertIsNone(self.hook())  # up to date: silent
@@ -282,11 +285,22 @@ class FreshCheckoutTests(unittest.TestCase):
         self.assertIn('git grep <text> origin/main', said)
         self.assertEqual(self.rule(), 'my edit\n')
         self.git(self.repo, 'commit', '-q', '-am', 'mine')
-        self.assertIn('because it holds commits of its own', self.hook())
+        said = self.hook()
+        self.assertIn('because it holds commits of its own', said)
+        self.assertIn('Rule files changed upstream: AGENTS.md', said)
         self.git(self.repo, 'reset', '-q', '--hard', 'HEAD~1')
         (Path(self.git(self.repo, 'rev-parse', '--absolute-git-dir').strip()) / 'rebase-merge').mkdir()
         self.assertIn('because a merge, rebase or cherry-pick is under way', self.hook())
         self.assertEqual(self.rule(), 'old rule\n')
+
+    def test_its_own_rule_edit_is_not_reported_as_upstreams(self):
+        (self.repo / 'CLAUDE.md').write_text('my rule\n', encoding='utf-8')
+        self.git(self.repo, 'add', 'CLAUDE.md')
+        self.git(self.repo, 'commit', '-q', '-m', 'my rule')
+        self.land('code.rs', 'fn main() {}\n')
+        said = self.hook()
+        self.assertIn('because it holds commits of its own', said)
+        self.assertNotIn('Rule files changed upstream', said)
 
     def test_another_live_session_in_the_checkout_keeps_it_still_and_names_the_new_rules(self):
         self.land('AGENTS.md', 'new rule\n')
@@ -307,8 +321,21 @@ class FreshCheckoutTests(unittest.TestCase):
         self.session(live.pid, self.root / 'elsewhere')  # a session in another folder does not count
         self.assertIn('fast-forwarded', self.hook(session_id='mine'))
         self.land('AGENTS.md', 'newest rule\n')
+        terminal = self.root / '.claude' / 'sessions'
+        self.session(live.pid, self.repo, folder=terminal)  # a plain terminal session counts too
+        self.assertIn('because 1 other live session works in it', self.hook(session_id='mine'))
+        shutil.rmtree(terminal)
         shutil.rmtree(self.sessions)
         self.assertIn('because live sessions could not be listed', self.hook())
+
+    @unittest.skipUnless(os.name == 'nt', 'process start times are compared on Windows')
+    def test_a_process_number_handed_on_after_a_crash_is_no_live_session(self):
+        self.land('AGENTS.md', 'new rule\n')
+        live = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.addCleanup(live.wait)
+        self.addCleanup(live.kill)
+        self.session(live.pid, self.repo, procStart='116444736000000000')  # 1970: another process had this number
+        self.assertIn('fast-forwarded', self.hook(session_id='mine'))
 
     def test_an_ignored_file_upstream_now_tracks_is_never_overwritten(self):
         (self.repo / '.git' / 'info' / 'exclude').write_text('local.cfg\n', encoding='utf-8')

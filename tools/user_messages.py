@@ -46,7 +46,7 @@ def messages(root, since):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--days', type=float, default=5)
-    ap.add_argument('--root', default=os.path.expanduser('~/.claude/projects'))
+    ap.add_argument('--root', default=os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or os.path.expanduser('~/.claude'), 'projects'))
     ap.add_argument('--grep', help='only messages matching this regular expression (case-insensitive)')
     ap.add_argument('--width', type=int, default=400)
     args = ap.parse_args()
