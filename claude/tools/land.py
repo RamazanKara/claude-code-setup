@@ -130,7 +130,7 @@ def check(top, command):
     code, out = run(shell, cwd=top, timeout=None)
     if code == 127 and os.name == 'nt':
         code, out = run(['powershell', '-NoProfile', '-Command', command], cwd=top, timeout=None)
-    return code == 0, out
+    return code, out
 
 
 def land(args):
@@ -206,10 +206,11 @@ def land(args):
                     'Run land.py again with --check "<the affected checks>"; nothing was pushed')
                 return 3
             say(f'main moved, so running the check: {args.check}')
-            ok, out = check(top, args.check)
-            if not ok:
-                say(f'check failed; nothing was pushed. The checkout stays rebased onto origin/main {upstream[:9]}; '
-                    'fix and commit, then run land.py again, which checks again first\n' + tail(out, 30))
+            code, out = check(top, args.check)
+            if code != 0:
+                say(f'check failed (exit {code}); nothing was pushed. The checkout stays rebased onto origin/main '
+                    f'{upstream[:9]}, and the next run checks again first. Read the output before running again: a hang '
+                    'or a safety stop the project names (an exit code its rules reserve) is not a flaky test\n' + tail(out, 30))
                 return 3
             clear(pending)
         sha = git(top, 'rev-parse', 'HEAD')
