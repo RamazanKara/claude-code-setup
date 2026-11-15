@@ -14,7 +14,7 @@ from npm when npm has a newer version; `agy update`; Orca through winget when wi
 version; then `orca skills update`. A before/after table of versions ends each machine's run.
 
 Windows will not replace a running exe. OpenCode's background `serve --service` process is stopped
-before its update (whoever started it starts it again). Any other running Codex or OpenCode session
+before its update when nothing else holds the exe; this script does not start it again. Any other running Codex or OpenCode session
 (an Orca agent, a DeepSeek worker) makes the script skip that update with a FAILED line, unless --force
 is given, which stops those sessions. Claude Code and agy update beside running sessions.
 
@@ -71,6 +71,9 @@ def run(cmd, timeout=900, check=False, quiet=False) -> Result:
             try:
                 out, err = p.communicate(timeout=timeout)
                 r = Result(p.returncode, out or '', err or '')
+            except KeyboardInterrupt:
+                subprocess.run(['taskkill', '/T', '/F', '/PID', str(p.pid)], capture_output=True)
+                raise
             except subprocess.TimeoutExpired:
                 subprocess.run(['taskkill', '/T', '/F', '/PID', str(p.pid)], capture_output=True)
                 try:
@@ -96,7 +99,17 @@ def processes(name):
     ps = (f"Get-CimInstance Win32_Process -Filter \"Name='{name}'\" | "
           "ForEach-Object { [string]$_.ProcessId + \"`t\" + $_.ExecutablePath + \"`t\" + $_.CommandLine }")
     r = run(['powershell', '-NoProfile', '-Command', ps], timeout=60, quiet=True)
+    if r.code != 0:
+        return None  # unknown: callers treat it as running
     return [tuple(line.split('\t', 2)) for line in r.out.splitlines() if line.count('\t') >= 2]
+
+
+def ancestors():
+    """PIDs of this script's parent chain, so --force never stops the session that started it."""
+    ps = ("$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\"; "
+          "while ($p) { Write-Output $p.ProcessId; "
+          "$p = Get-CimInstance Win32_Process -Filter (\"ProcessId=\" + $p.ParentProcessId) }")
+    return set(run(['powershell', '-NoProfile', '-Command', ps], timeout=60, quiet=True).out.split())
 
 
 def stop(pid):
@@ -104,7 +117,8 @@ def stop(pid):
 
 
 def orca_running():
-    return bool(processes('Orca.exe'))
+    procs = processes('Orca.exe')
+    return procs is None or bool(procs)
 
 
 def versions():
@@ -171,9 +185,16 @@ def update_npm(force):
 
 def free_exe(name, force):
     """Stop what holds npm's <name>.exe: the OpenCode service always, sessions only with --force."""
-    procs = [p for p in processes(f'{name}.exe') if '\\npm\\node_modules\\' in p[1].lower()]
+    found = processes(f'{name}.exe')
+    if found is None:
+        FAILED.append(f'{name} update skipped: could not list running processes')
+        return False
+    procs = [p for p in found if '\\npm\\node_modules\\' in p[1].lower()]
     service = [p for p in procs if 'serve --service' in p[2]]
     sessions = [p for p in procs if p not in service]
+    if sessions and force and {p[0] for p in sessions} & ancestors():
+        FAILED.append(f'{name} update skipped: --force from inside a {name} session would stop this script')
+        return False
     if sessions and not force:
         print(f'  {name}: skipped, {len(sessions)} session(s) running (rerun with --force to stop them)')
         FAILED.append(f'{name} update skipped: {len(sessions)} running session(s) (use --force)')
@@ -196,13 +217,13 @@ def update_orca(allow_close):
         FAILED.append(f'winget list {ORCA_ID} (exit {r.code}): {first_line(r.text[-300:])}')
         return
     was_running = orca_running()
+    if os.environ.get('ORCA_APP_VERSION') and (was_running or allow_close):
+        print('  orca: refusing to upgrade from inside Orca (the installer would close this script); use a plain terminal')
+        FAILED.append('orca upgrade skipped: run from inside Orca')
+        return
     if was_running and not allow_close:
         print('  orca: an upgrade is available but Orca is running; rerun with --orca from a plain terminal')
         FAILED.append('orca upgrade skipped: Orca running (use --orca)')
-        return
-    if was_running and os.environ.get('ORCA_APP_VERSION'):
-        print('  orca: refusing --orca from inside Orca (the installer would close this script); use a plain terminal')
-        FAILED.append('orca upgrade skipped: run from inside Orca')
         return
     print('  orca: upgrading' + (' (closes the running Orca)' if was_running else ''))
     r = run(['winget', 'upgrade', '--id', ORCA_ID, '--exact', '--silent', '--disable-interactivity',
@@ -218,7 +239,7 @@ def start_in_desktop(exe: Path):
     task = 'UpdateHarnessesRelaunch'
     ps = (f"$a = New-ScheduledTaskAction -Execute '{exe}'; "
           "$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive; "
-          "$s = New-ScheduledTaskSettingsSet -Priority 4 -ExecutionTimeLimit 0 -AllowStartIfOnBatteries; "
+          "$s = New-ScheduledTaskSettingsSet -Priority 4 -ExecutionTimeLimit 0 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; "
           f"Register-ScheduledTask -TaskName '{task}' -Action $a -Principal $p -Settings $s -Force | Out-Null; "
           f"Start-ScheduledTask -TaskName '{task}'")
     ok = exe.exists() and run(['powershell', '-NoProfile', '-Command', ps], timeout=60, quiet=True).code == 0
