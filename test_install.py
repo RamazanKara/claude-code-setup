@@ -156,7 +156,7 @@ class InstallerTests(unittest.TestCase):
             with patch.multiple(install, HOME=home, OPENCODE=Path(tmp) / 'none', SHARED={}, RETIRED_AGENTS={}):
                 install.Installer(False).run()
             self.assertTrue((home / 'hooks' / 'read_streak.py').exists())
-            self.assertEqual(sorted(tool.name for tool in (home / 'tools').iterdir()), ['land.py', 'memory_sync.py', 'task.py'])
+            self.assertEqual(sorted(tool.name for tool in (home / 'tools').iterdir()), ['land.py', 'memory_sync.py', 'task.py', 'update_harnesses.py'])
 
 
 class ReadStreakHookTests(unittest.TestCase):
