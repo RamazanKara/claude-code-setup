@@ -116,7 +116,8 @@ class InstallerTests(unittest.TestCase):
                 for tool in ('deepseek.py', 'memory_sync.py', 'task.py'):
                     self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
                 self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SessionStart']],
-                                 [[(home / 'tools' / 'task.py').as_posix(), 'daily']])
+                                 [[(home / 'tools' / 'task.py').as_posix(), 'daily'],
+                                  [(home / 'hooks' / 'fresh_checkout.py').as_posix()]])
                 self.assertEqual(install.read_json(home / 'machine.json'), install.read_json(install.REPO / 'machine.example.json'))
                 self.assertEqual(settings['permissions'], {'allow': ['Read']})
                 self.assertEqual(settings['skillOverrides'], {'custom': 'on'})
@@ -217,6 +218,85 @@ class ReadStreakHookTests(unittest.TestCase):
         done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'read_streak.py')], input='not json',
                               capture_output=True, text=True, env=self.env)
         self.assertEqual((done.returncode, done.stdout), (0, ''))
+
+
+class FreshCheckoutTests(unittest.TestCase):
+    HOOK = install.REPO / 'hooks' / 'fresh_checkout.py'
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.env = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+                    'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
+        self.env.pop('CLAUDE_FRESH_CHECKOUT', None)
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.root / 'origin.git')], check=True, env=self.env)
+        self.other, self.repo = self.root / 'other', self.root / 'work'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.other)], check=True, env=self.env)
+        self.git(self.other, 'remote', 'add', 'origin', str(self.root / 'origin.git'))
+        self.land('AGENTS.md', 'old rule\n')
+        subprocess.run(['git', 'clone', '-q', str(self.root / 'origin.git'), str(self.repo)], check=True, env=self.env)
+
+    def git(self, where, *args):
+        return subprocess.run(['git', '-C', str(where), *args], check=True, env=self.env, capture_output=True, text=True).stdout
+
+    def land(self, name, text):
+        """A commit someone else pushes to main."""
+        (self.other / name).write_text(text, encoding='utf-8')
+        self.git(self.other, 'add', '-A')
+        self.git(self.other, 'commit', '-q', '-m', name)
+        self.git(self.other, 'push', '-q', 'origin', 'HEAD:main')
+
+    def hook(self, env=None, **event):
+        done = subprocess.run([sys.executable, str(self.HOOK)], input=json.dumps({'cwd': str(self.repo), 'source': 'startup', **event}),
+                              capture_output=True, text=True, env={**self.env, **(env or {})})
+        self.assertEqual((done.returncode, done.stderr), (0, ''))
+        return json.loads(done.stdout)['hookSpecificOutput']['additionalContext'] if done.stdout else None
+
+    def rule(self):
+        return (self.repo / 'AGENTS.md').read_text(encoding='utf-8')
+
+    def test_a_clean_main_behind_is_fast_forwarded_and_untracked_files_stay(self):
+        self.assertIsNone(self.hook())  # up to date: silent
+        self.land('AGENTS.md', 'new rule\n')
+        self.land('code.rs', 'fn main() {}\n')
+        (self.repo / 'drafts.md').write_text('mine\n', encoding='utf-8')
+        said = self.hook(cwd=str(self.repo / '.git' / '..'))
+        self.assertIn('2 commits behind origin/main and was fast-forwarded', said)
+        self.assertIn('Changed with it: AGENTS.md', said)
+        self.assertEqual(self.rule(), 'new rule\n')
+        self.assertTrue((self.repo / 'drafts.md').exists())
+        self.assertIsNone(self.hook())
+
+    def test_own_commits_edits_or_a_rebase_under_way_are_left_and_named(self):
+        self.land('AGENTS.md', 'new rule\n')
+        (self.repo / 'AGENTS.md').write_text('my edit\n', encoding='utf-8')
+        said = self.hook()
+        self.assertIn('1 commits behind origin/main and was left as it is because it has edits to tracked files', said)
+        self.assertIn('git grep <text> origin/main', said)
+        self.assertEqual(self.rule(), 'my edit\n')
+        self.git(self.repo, 'commit', '-q', '-am', 'mine')
+        self.assertIn('because it holds commits of its own', self.hook())
+        self.git(self.repo, 'reset', '-q', '--hard', 'HEAD~1')
+        (Path(self.git(self.repo, 'rev-parse', '--absolute-git-dir').strip()) / 'rebase-merge').mkdir()
+        self.assertIn('because a merge, rebase or cherry-pick is under way', self.hook())
+        self.assertEqual(self.rule(), 'old rule\n')
+
+    def test_other_branches_compaction_and_the_switch_stay_silent(self):
+        self.land('AGENTS.md', 'new rule\n')
+        self.assertIsNone(self.hook(source='compact'))
+        self.assertIsNone(self.hook(env={'CLAUDE_FRESH_CHECKOUT': '0'}))
+        self.git(self.repo, 'switch', '-q', '-c', 'topic')
+        self.assertIsNone(self.hook())
+        self.assertIsNone(self.hook(cwd=str(self.root)))  # no repository
+        self.assertEqual(self.rule(), 'old rule\n')
+
+    def test_installer_registers_it_with_room_for_the_fetch(self):
+        config = {}
+        install.set_hooks(config)
+        entry = [g for g in config['hooks']['SessionStart'] if 'fresh_checkout.py' in json.dumps(g)]
+        self.assertEqual(len(entry), 1)
+        self.assertEqual(entry[0]['hooks'][0]['timeout'], 60)
 
 
 class ReviewGateTests(unittest.TestCase):

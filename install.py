@@ -82,7 +82,9 @@ def clean_claude(config):
 HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
          ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
          ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)),
-         ('SessionStart', None, 'tools/task.py', ('daily',)))
+         ('SessionStart', None, 'tools/task.py', ('daily',)),
+         ('SessionStart', None, 'fresh_checkout.py', ()))
+TIMEOUTS = {'fresh_checkout.py': 60}  # a fetch, then a fast-forward that must not be stopped half-way
 
 
 def set_hooks(config):
@@ -90,7 +92,8 @@ def set_hooks(config):
     for event, matcher, name, args in HOOKS:
         script = HOME / (name if '/' in name else 'hooks/' + name)
         entry = {'hooks': [{'type': 'command', 'command': Path(sys.executable).as_posix(),
-                            'args': [script.as_posix(), *args], 'timeout': 20 if args else 10}]}
+                            'args': [script.as_posix(), *args],
+                            'timeout': TIMEOUTS.get(name, 20 if args else 10)}]}
         if matcher:
             entry = {'matcher': matcher, **entry}
         groups = config.setdefault('hooks', {}).setdefault(event, [])

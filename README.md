@@ -28,6 +28,8 @@ A memory folder is shared with a second machine by `claude/tools/memory_sync.py`
 
 The installer also copies `claude/hooks/read_streak.py` to `~/.claude/hooks` and registers it as a `PostToolBatch` hook in `settings.json`, run by the Python that ran the installer (rerun it if that Python moves). The hook counts turns in a row that made one read-only call and, at the third and every sixth after, adds one line telling the model to batch its reads or hand the survey to a helper (in a subagent, to `scout` or `deepseek.py`). It never blocks a call, skips the cheap helper agents, and `CLAUDE_READ_STREAK` sets the first nudge (0 turns it off). The reason is in our own transcripts (`tools/context_fill.py`, four days to 2026-11-13): 80 to 90% of turns made a single tool call, and streaks of three or more turns with one read-only call each were 19% of main-chat and 37% of subagent spend, while whole-file reads of over 350 lines were 2% of what fills the main context. So the hook watches turns, not file size.
 
+A second `SessionStart` hook, `claude/hooks/fresh_checkout.py`, brings the session's checkout up to its remote branch: when it is on `main` or `master`, holds no commits of its own, no edits to tracked files (edits inside a submodule do not count) and no merge or rebase under way, it fetches and fast-forwards; otherwise, when it is behind, it tells the session in one line to read `origin/main` instead. It never merges, stashes or resets, and `CLAUDE_FRESH_CHECKOUT=0` turns it off. The reason: the Rubylight checkout most sessions start in sat 26 commits behind on 2026-11-15, so sessions loaded an AGENTS.md with rules the user had withdrawn a day earlier, and one search of old code told the user that a feature released the day before was not ours. Claude Code loads `CLAUDE.md` and `AGENTS.md` before this hook runs (probed), so the session it updates is told which of them changed, and the next one loads them current.
+
 Edit templates here before reinstalling. Keep machine-specific paths in `~/.claude/personal.md`, which Claude imports and the other agents get inlined; rerun the installer after editing it. Existing hooks, credentials and allow permissions are preserved. The installer removes deny permissions, the old desktop skill blocks, OpenCode helper routing and the disabled general agent override. It also removes the retired Opus helper definitions when their contents still match this setup; user replacements are preserved.
 
 ## Contents
@@ -36,6 +38,7 @@ Edit templates here before reinstalling. Keep machine-specific paths in `~/.clau
 - `claude/agents/`: Haiku scout, runner and mechanic definitions, and the Opus reviewer.
 - `claude/hooks/read_streak.py`: the nudge after read-only turns of one call each.
 - `claude/hooks/review_gate.py`: holds back an unreviewed push to main and notes when the reviewer ran.
+- `claude/hooks/fresh_checkout.py`: fast-forwards a clean checkout on main at session start, or says it is behind.
 - `opencode/agents/`: DeepSeek V4.1 Flash scout, runner and mechanic definitions, without deny permissions.
 - `codex/agents/`: GPT-6 Luna scout, runner and mechanic definitions at medium reasoning effort.
 - `antigravity/agents/`: Gemini Flash scout, runner and mechanic definitions.
