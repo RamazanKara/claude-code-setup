@@ -156,7 +156,7 @@ class InstallerTests(unittest.TestCase):
             with patch.multiple(install, HOME=home, OPENCODE=Path(tmp) / 'none', SHARED={}, RETIRED_AGENTS={}):
                 install.Installer(False).run()
             self.assertTrue((home / 'hooks' / 'read_streak.py').exists())
-            self.assertEqual(sorted(tool.name for tool in (home / 'tools').iterdir()), ['memory_sync.py', 'task.py'])
+            self.assertEqual(sorted(tool.name for tool in (home / 'tools').iterdir()), ['land.py', 'memory_sync.py', 'task.py'])
 
 
 class ReadStreakHookTests(unittest.TestCase):
@@ -380,6 +380,153 @@ class FreshCheckoutTests(unittest.TestCase):
         entry = [g for g in config['hooks']['SessionStart'] if 'fresh_checkout.py' in json.dumps(g)]
         self.assertEqual(len(entry), 1)
         self.assertEqual(entry[0]['hooks'][0]['timeout'], 60)
+
+
+class LandToolTests(unittest.TestCase):
+    TOOL = install.REPO / 'tools' / 'land.py'
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.env = {**os.environ, 'TMPDIR': tmp.name, 'TEMP': tmp.name, 'TMP': tmp.name, 'CLAUDECODE': '1',
+                    'CLAUDE_REVIEW_LOG': str(self.root / 'gate.log'), 'GIT_CONFIG_GLOBAL': os.devnull,
+                    'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+                    'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
+        self.env.pop('CLAUDE_REVIEW_MIN_LINES', None)
+        self.origin = self.root / 'origin.git'
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.origin)], check=True, env=self.env)
+        self.other, self.repo = self.root / 'other', self.root / 'work'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.other)], check=True, env=self.env)
+        self.git(self.other, 'remote', 'add', 'origin', str(self.origin))
+        self.put(self.other, 'a.rs', 'fn a() {}\n')
+        self.git(self.other, 'push', '-q', 'origin', 'HEAD:main')
+        subprocess.run(['git', 'clone', '-q', str(self.origin), str(self.repo)], check=True, env=self.env)
+
+    def git(self, where, *args):
+        return subprocess.run(['git', '-C', str(where), *args], check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+
+    def put(self, where, name, text, message=None):
+        path = Path(where) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding='utf-8')
+        self.git(where, 'add', '-A')
+        self.git(where, 'commit', '-q', '-m', message or name)
+
+    def upstream(self, name, text):
+        self.git(self.other, 'pull', '-q', '--rebase', 'origin', 'main')
+        self.put(self.other, name, text)
+        self.git(self.other, 'push', '-q', 'origin', 'HEAD:main')
+
+    def land(self, *args, env=None, tool=None):
+        done = subprocess.run([sys.executable, str(tool or self.TOOL), '--repo', str(self.repo), *args], capture_output=True,
+                              text=True, env={**self.env, **(env or {})}, encoding='utf-8')
+        return done.returncode, done.stdout + done.stderr
+
+    def main_sha(self):
+        return self.git(self.origin, 'rev-parse', 'main')
+
+    def decisions(self):
+        log = self.root / 'gate.log'
+        return [json.loads(line)['decision'] for line in log.read_text(encoding='utf-8').splitlines()] if log.exists() else []
+
+    def test_nothing_to_land_and_a_small_change_lands(self):
+        self.assertEqual(self.land()[0], 0)
+        self.put(self.repo, 'b.rs', 'fn b() {}\n')
+        code, out = self.land()
+        self.assertEqual(code, 0, out)
+        self.assertIn('landed', out)
+        self.assertEqual(self.main_sha(), self.git(self.repo, 'rev-parse', 'HEAD'))
+
+    def test_a_moved_main_is_rebased_and_only_then_checked(self):
+        mark = self.root / 'checked'
+        check = 'python -c "import os; open(os.environ[\'MARK\'], \'a\').write(\'x\')"'
+        self.put(self.repo, 'b.rs', 'fn b() {}\n')
+        self.assertEqual(self.land('--check', check, env={'MARK': str(mark)})[0], 0)
+        self.assertFalse(mark.exists())  # main had not moved: no check
+        self.put(self.repo, 'c.rs', 'fn c() {}\n')
+        self.upstream('d.rs', 'fn d() {}\n')
+        code, out = self.land('--check', check, env={'MARK': str(mark)})
+        self.assertEqual(code, 0, out)
+        self.assertIn('rebased 1 commit', out)
+        self.assertTrue(mark.exists())
+        self.assertEqual(self.git(self.origin, 'log', '--format=%s', '-2', 'main').splitlines(), ['c.rs', 'd.rs'])
+
+    def test_a_failed_check_or_a_conflict_pushes_nothing_and_leaves_the_checkout(self):
+        self.put(self.repo, 'b.rs', 'fn mine() {}\n')
+        self.upstream('e.rs', 'fn e() {}\n')
+        before = self.main_sha()
+        code, out = self.land('--check', 'exit 7')
+        self.assertEqual(code, 3, out)
+        self.assertEqual(self.main_sha(), before)
+        self.upstream('b.rs', 'fn theirs() {}\n')
+        head = self.git(self.repo, 'rev-parse', 'HEAD')
+        code, out = self.land()
+        self.assertEqual(code, 2, out)
+        self.assertIn('b.rs', out)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git(self.repo, 'status', '--porcelain'), '')
+
+    def test_uncommitted_edits_are_refused_and_untracked_files_are_not(self):
+        self.put(self.repo, 'b.rs', 'fn b() {}\n')
+        (self.repo / 'b.rs').write_text('fn edited() {}\n', encoding='utf-8')
+        code, out = self.land()
+        self.assertEqual(code, 1, out)
+        self.assertIn('never stashes', out)
+        self.git(self.repo, 'checkout', '--', 'b.rs')
+        (self.repo / 'notes.txt').write_text('mine\n', encoding='utf-8')
+        self.assertEqual(self.land()[0], 0)
+        self.assertTrue((self.repo / 'notes.txt').exists())
+
+    def test_a_large_unreviewed_change_is_held_and_a_skip_passes_and_is_logged(self):
+        self.put(self.repo, 'big.rs', ''.join(f'let v{n} = {n};\n' for n in range(300)))
+        before = self.main_sha()
+        code, out = self.land()
+        self.assertEqual(code, 4, out)
+        self.assertIn('land.py again', out)
+        self.assertNotIn('REVIEW_SKIP=<reason>` at the end', out)
+        self.assertEqual(self.main_sha(), before)
+        self.assertEqual(self.decisions(), ['held'])
+        code, out = self.land('--skip', 'user asked for speed')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.decisions(), ['held', 'skipped'])
+
+    def test_outside_claude_code_the_gate_is_not_asked_and_a_missing_gate_holds(self):
+        self.put(self.repo, 'big.rs', ''.join(f'let v{n} = {n};\n' for n in range(300)))
+        lone = self.root / 'lone' / 'tools'
+        lone.mkdir(parents=True)
+        shutil.copy(self.TOOL, lone / 'land.py')
+        code, out = self.land(tool=lone / 'land.py')
+        self.assertEqual(code, 4, out)
+        self.assertIn('review gate is missing', out)
+        code, out = self.land(env={'CLAUDECODE': ''})
+        self.assertEqual(code, 0, out)
+        self.assertIn('review gate not asked', out)
+
+    def test_a_detached_worktree_given_as_a_git_bash_path_lands(self):
+        wt = self.root / 'wt'
+        self.git(self.repo, 'worktree', 'add', '-q', '--detach', str(wt), 'origin/main')
+        self.put(wt, 'f.rs', 'fn f() {}\n')
+        path = str(wt)
+        if os.name == 'nt':
+            path = '/' + path[0].lower() + path[2:].replace('\\', '/')
+        done = subprocess.run([sys.executable, str(self.TOOL), '--repo', path], capture_output=True, text=True, env=self.env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.main_sha(), self.git(wt, 'rev-parse', 'HEAD'))
+
+    def test_main_moving_during_the_push_is_fetched_rebased_and_pushed_again(self):
+        hook = self.repo / '.git' / 'hooks' / 'pre-push'
+        once = self.root / 'raced'
+        hook.write_text('#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX\n'
+                        f'if [ ! -f "{once.as_posix()}" ]; then touch "{once.as_posix()}"; '
+                        f'git -C "{self.other.as_posix()}" commit -q --allow-empty -m race && '
+                        f'git -C "{self.other.as_posix()}" push -q origin HEAD:main; fi\nexit 0\n', encoding='utf-8', newline='\n')
+        hook.chmod(0o755)
+        self.put(self.repo, 'g.rs', 'fn g() {}\n')
+        code, out = self.land()
+        self.assertEqual(code, 0, out)
+        self.assertIn('main moved during the push', out)
+        self.assertEqual(self.git(self.origin, 'log', '--format=%s', '-2', 'main').splitlines(), ['g.rs', 'race'])
 
 
 class ReviewGateTests(unittest.TestCase):

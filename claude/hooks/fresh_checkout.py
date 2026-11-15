@@ -95,9 +95,14 @@ def alive(pid, started=None):
     return True
 
 
-def others_in(top, me):
-    """Live sessions other than this one whose folder lies in the checkout; None when that cannot be known."""
-    homes = {os.path.normcase(os.path.abspath(h)) for h in (os.environ.get('CLAUDE_CONFIG_DIR'), os.path.expanduser('~/.claude')) if h}
+def others_in(top, me, transcript=None):
+    """Live sessions other than this one whose folder lies in the checkout; None when that cannot be known. The
+    config folders read: CLAUDE_CONFIG_DIR, ~/.claude, and the one this session's transcript lies in."""
+    homes = [os.environ.get('CLAUDE_CONFIG_DIR'), os.path.expanduser('~/.claude')]
+    parts = os.path.normpath(transcript).split(os.sep) if transcript else []
+    if len(parts) > 3 and parts[-3].lower() == 'projects':
+        homes.append(os.sep.join(parts[:-3]))
+    homes = {os.path.normcase(os.path.abspath(h)) for h in homes if h}
     folders = [os.path.join(h, 'sessions') for h in sorted(homes) if os.path.isdir(os.path.join(h, 'sessions'))]
     if not folders:
         return None
@@ -156,7 +161,7 @@ def main():
         return
     gitdir = git(top, 'rev-parse', '--absolute-git-dir') or ''
     dirty = git(top, 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all', timeout=10)
-    others = others_in(top, event.get('session_id'))
+    others = others_in(top, event.get('session_id'), event.get('transcript_path'))
     why = ('it holds commits of its own' if ahead else
            'a merge, rebase or cherry-pick is under way' if any(os.path.exists(os.path.join(gitdir, n)) for n in UNDER_WAY) else
            'it has edits to tracked files' if dirty else

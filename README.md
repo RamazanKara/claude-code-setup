@@ -32,6 +32,8 @@ A second `SessionStart` hook, `claude/hooks/fresh_checkout.py`, brings the sessi
 
 Edit templates here before reinstalling. Keep machine-specific paths in `~/.claude/personal.md`, which Claude imports and the other agents get inlined; rerun the installer after editing it. Existing hooks, credentials and allow permissions are preserved. The installer removes deny permissions, the old desktop skill blocks, OpenCode helper routing and the disabled general agent override. It also removes the retired Opus helper definitions when their contents still match this setup; user replacements are preserved.
 
+`claude/tools/land.py` turns the landing chore into one call. Before it, a push to `main` took about seven git and `gh` calls (fetch, status, rebase, log, push, then CI polling), with 79 pushes in two days on 2026-11-13 and 14. It fetches `origin/main`, rebases onto it (never with a stash: tracked edits must be committed first), runs `--check` only when the rebase brought in other commits, asks `review_gate.py` about the exact commit as if it were a push command, pushes that commit, and when `main` moved meanwhile fetches, rebases and asks again, three times at most. It never force-pushes. Its exit code says where it stopped: 0 landed or nothing to land, 1 usage or checkout, 2 rebase conflict (aborted, checkout unchanged), 3 check failed, 4 held by the review gate, 5 push failed, 6 CI failed. `--watch` waits for the commit's push-triggered CI runs, one `gh` call a minute, and prints the failed jobs' log tails; `--ci <sha>` does only that. Outside Claude Code (`CLAUDECODE` unset) the gate is not asked, since the hook does not guard those agents either.
+
 ## Contents
 
 - `claude/CLAUDE.md`: autonomy, focused changes, verification, Git landing, lean context, delegation (helpers, DeepSeek workers through Orca or `deepseek.py`, subagent models, the advisor, review, briefs) and temporary-output rules.
@@ -51,6 +53,7 @@ Edit templates here before reinstalling. Keep machine-specific paths in `~/.clau
 - `test_install.py`: installer migration, backup and repeat-install checks, and the behaviour of the hooks, the DeepSeek tool and the task tool (`python -m unittest -v`).
 - `tools/cost_report.py`: optional historical transcript analysis, with advisor calls listed apart; it does not control the workflow.
 - `tools/context_fill.py`: what fills Claude Code contexts (tool results by tool, shell output by command kind) and where the turns go (tool calls per turn, spend in read-only streaks).
+- `claude/tools/land.py`: lands a checkout's commits on the remote `main` in one call (fetch, rebase, check when `main` moved, review gate, push, retry on a race) and optionally waits for their CI.
 - `tools/user_messages.py`: the messages you typed, one per line, to find where the agents cost you corrections.
 - `tools/opencode_cost.py`: where OpenCode's Anthropic spend goes: cost split, context sizes, what fills the context, and the 5-minute vs 1-hour cache trade-off.
 
