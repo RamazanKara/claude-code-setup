@@ -3,7 +3,7 @@ name: mechanic
 description: Haiku. Use for fully specified mechanical edits - renames, find/replace, version bumps, moves, config values, applying an exact diff, lint autofix. No judgment or debugging.
 model: haiku
 effort: medium
-tools: Read, Edit, Write, Grep, Glob, Bash, PowerShell
+tools: Read, Edit, Write, Grep, Glob, Bash
 autoCompactWindow: 100000
 maxTurns: 80
 experimental:

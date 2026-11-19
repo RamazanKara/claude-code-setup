@@ -57,19 +57,27 @@ def without_denies(value):
     return value
 
 
-def clean_permissions(config):
+# Tools hidden from the model to keep the prompt small; every other deny rule is removed.
+TOOL_DENIES = ('ScheduleWakeup', 'ReportFindings')
+
+
+def clean_permissions(config, keep=()):
     for key in ('permission', 'permissions'):
         if key in config:
             if config[key] == 'deny':
                 del config[key]
                 continue
+            denies = config[key].get('deny') if isinstance(config[key], dict) else None
+            kept = [rule for rule in denies if rule in keep] if isinstance(denies, list) else []
             config[key] = without_denies(config[key])
+            if kept:
+                config[key]['deny'] = list(dict.fromkeys(kept))
             if not config[key]:
                 del config[key]
 
 
 def clean_claude(config):
-    clean_permissions(config)
+    clean_permissions(config, TOOL_DENIES)
     overrides = config.get('skillOverrides', {})
     for skill in ('built-in-browser', 'chrome-browser', 'computer-use', 'docs'):
         if overrides.get(skill) == 'off':

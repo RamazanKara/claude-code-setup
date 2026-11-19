@@ -3,7 +3,7 @@ name: runner
 description: Haiku. Use for long builds, test suites, benchmarks and scripts, and chores (sync, clean rebase, push, CI wait, tag a given SHA); reports results. Never edits code; stops at the first failure.
 model: haiku
 effort: medium
-tools: Read, Grep, Glob, Bash, PowerShell, ToolSearch, Monitor, TaskStop
+tools: Read, Grep, Glob, Bash, ToolSearch, Monitor, TaskStop
 autoCompactWindow: 100000
 maxTurns: 300
 experimental:

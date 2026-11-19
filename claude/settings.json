@@ -6,7 +6,8 @@
   "env": {
     "CLAUDE_CODE_SUBAGENT_MODEL": "opus",
     "CLAUDE_CODE_DISABLE_ARTIFACT": "1",
-    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1"
+    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1",
+    "CLAUDE_CODE_USE_POWERSHELL_TOOL": "0"
   },
   "disableClaudeAiConnectors": true,
   "skillOverrides": {
@@ -25,7 +26,17 @@
     "anthropic-skills:pptx": "name-only",
     "anthropic-skills:xlsx": "name-only",
     "anthropic-skills:pdf": "name-only",
-    "anthropic-skills:docs": "off"
+    "anthropic-skills:docs": "off",
+    "image-gen": "name-only",
+    "orca-computer-use": "name-only",
+    "orchestration": "name-only",
+    "dataviz": "name-only",
+    "update-config": "name-only",
+    "claude-api": "name-only",
+    "workflow-authoring": "name-only",
+    "anthropic-skills:built-in-browser": "name-only",
+    "anthropic-skills:chrome-browser": "name-only",
+    "anthropic-skills:computer-use": "name-only"
   },
   "modelSettings": {
     "claude-fable-5-2": {
@@ -38,5 +49,11 @@
       "autoCompactWindow": 300000
     }
   },
-  "autoCompactWindow": 200000
+  "autoCompactWindow": 200000,
+  "permissions": {
+    "deny": [
+      "ScheduleWakeup",
+      "ReportFindings"
+    ]
+  }
 }

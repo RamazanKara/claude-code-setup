@@ -41,6 +41,9 @@ class InstallerTests(unittest.TestCase):
         config = {'permission': 'deny'}
         install.clean_permissions(config)
         self.assertEqual(config, {})
+        config = {'permissions': {'deny': ['Bash(rm:*)', 'ScheduleWakeup', 'ScheduleWakeup']}}
+        install.clean_claude(config)  # only the tools we hide stay denied
+        self.assertEqual(config, {'permissions': {'deny': ['ScheduleWakeup']}})
 
     def test_opencode_preserves_custom_agent_properties(self):
         config = {'agents': {'explore': {'model': 'opencode-go/deepseek-v4.1-flash', 'custom': True},
@@ -105,8 +108,8 @@ class InstallerTests(unittest.TestCase):
                 batch = settings['hooks']['PostToolBatch']
                 self.assertEqual(batch[0], other)
                 self.assertEqual([g['hooks'][0]['args'] for g in batch[1:]], [[script.as_posix()]])
-                self.assertEqual(settings['env'], {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus', 'CLAUDE_CODE_DISABLE_ARTIFACT': '1',
-                                                   'CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS': '1'})
+                self.assertEqual(settings['env'], {'KEEP': '1', **install.read_json(install.REPO / 'settings.json')['env']})
+                self.assertEqual(settings['env']['CLAUDE_CODE_SUBAGENT_MODEL'], 'opus')
                 self.assertIs(settings['disableClaudeAiConnectors'], True)
                 self.assertEqual(settings['skillOverrides']['code-review'], 'user-invocable-only')
                 self.assertEqual(settings['skillOverrides']['anthropic-skills:docs'], 'off')  # not the legacy 'docs' key the cleanup drops
@@ -126,7 +129,7 @@ class InstallerTests(unittest.TestCase):
                                  [[(home / 'tools' / 'task.py').as_posix(), 'daily'],
                                   [(home / 'hooks' / 'fresh_checkout.py').as_posix()]])
                 self.assertEqual(install.read_json(home / 'machine.json'), install.read_json(install.REPO / 'machine.example.json'))
-                self.assertEqual(settings['permissions'], {'allow': ['Read']})
+                self.assertEqual(settings['permissions'], {'allow': ['Read'], 'deny': list(install.TOOL_DENIES)})
                 ours = install.read_json(install.REPO / 'settings.json')['skillOverrides']
                 self.assertEqual(settings['skillOverrides'], {'custom': 'on', **ours})  # the legacy 'docs' key is gone
                 self.assertNotIn('docs', settings['skillOverrides'])

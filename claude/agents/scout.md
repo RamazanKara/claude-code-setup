@@ -3,7 +3,7 @@ name: scout
 description: Haiku. Searches files, symbols, call sites, config and history; answers where/how questions with path:line evidence. Read-only.
 model: haiku
 effort: medium
-tools: Read, Grep, Glob, Bash, PowerShell
+tools: Read, Grep, Glob, Bash
 omitClaudeMd: true
 autoCompactWindow: 100000
 maxTurns: 60
