@@ -112,6 +112,9 @@ class InstallerTests(unittest.TestCase):
                                  [('Bash|PowerShell', [gate, 'push'])])
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['SubagentStop']],
                                  [('reviewer', [gate, 'reviewed'])])
+                guard = (home / 'hooks' / 'advisor_guard.py').as_posix()
+                self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SubagentStart']], [[guard]])
+                self.assertNotIn('matcher', settings['hooks']['SubagentStart'][0])
                 self.assertTrue((agents / 'reviewer.md').exists())
                 for tool in ('deepseek.py', 'memory_sync.py', 'task.py'):
                     self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
@@ -218,6 +221,30 @@ class ReadStreakHookTests(unittest.TestCase):
         done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'read_streak.py')], input='not json',
                               capture_output=True, text=True, env=self.env)
         self.assertEqual((done.returncode, done.stdout), (0, ''))
+
+
+class AdvisorGuardHookTests(unittest.TestCase):
+    HOOK = install.REPO / 'hooks' / 'advisor_guard.py'
+
+    def hook(self, event, **env):
+        environ = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_ADVISOR_GUARD', 'CLAUDE_CODE_DISABLE_ADVISOR_TOOL')}
+        done = subprocess.run([sys.executable, str(self.HOOK)], input=event if isinstance(event, str) else json.dumps(event),
+                              capture_output=True, text=True, env={**environ, **env})
+        self.assertEqual(done.returncode, 0)
+        return json.loads(done.stdout)['hookSpecificOutput'] if done.stdout else None
+
+    def test_every_subagent_is_told_to_leave_the_advisor_alone(self):
+        for agent in ('general-purpose', 'reviewer', 'scout', 'web-fetch'):
+            out = self.hook({'session_id': 's', 'hook_event_name': 'SubagentStart', 'agent_id': 'a1', 'agent_type': agent})
+            self.assertEqual(out['hookEventName'], 'SubagentStart')
+            self.assertIn('do not call the advisor tool unless your brief explicitly asks', out['additionalContext'])
+
+    def test_off_switches_other_events_and_bad_input_stay_silent(self):
+        start = {'hook_event_name': 'SubagentStart', 'agent_type': 'general-purpose'}
+        self.assertIsNone(self.hook(start, CLAUDE_ADVISOR_GUARD='0'))
+        self.assertIsNone(self.hook(start, CLAUDE_CODE_DISABLE_ADVISOR_TOOL='1'))
+        self.assertIsNone(self.hook({'hook_event_name': 'SessionStart'}))
+        self.assertIsNone(self.hook('not json'))
 
 
 class FreshCheckoutTests(unittest.TestCase):

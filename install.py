@@ -82,6 +82,7 @@ def clean_claude(config):
 HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
          ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
          ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)),
+         ('SubagentStart', None, 'advisor_guard.py', ()),
          ('SessionStart', None, 'tools/task.py', ('daily',)),
          ('SessionStart', None, 'fresh_checkout.py', ()))
 TIMEOUTS = {'fresh_checkout.py': 60}  # a fetch, then a fast-forward that must not be stopped half-way
