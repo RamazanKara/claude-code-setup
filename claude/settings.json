@@ -4,7 +4,8 @@
   "advisorModel": "fable",
   "subagentPromptCacheTtl": "1h",
   "env": {
-    "CLAUDE_CODE_SUBAGENT_MODEL": "opus"
+    "CLAUDE_CODE_SUBAGENT_MODEL": "opus",
+    "CLAUDE_CODE_DISABLE_ARTIFACT": "1"
   },
   "modelSettings": {
     "claude-fable-5-2": {

@@ -105,7 +105,7 @@ class InstallerTests(unittest.TestCase):
                 batch = settings['hooks']['PostToolBatch']
                 self.assertEqual(batch[0], other)
                 self.assertEqual([g['hooks'][0]['args'] for g in batch[1:]], [[script.as_posix()]])
-                self.assertEqual(settings['env'], {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus'})
+                self.assertEqual(settings['env'], {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus', 'CLAUDE_CODE_DISABLE_ARTIFACT': '1'})
                 self.assertEqual(settings['advisorModel'], 'fable')
                 gate = (home / 'hooks' / 'review_gate.py').as_posix()
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['PreToolUse']],
