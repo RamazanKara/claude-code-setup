@@ -6,7 +6,6 @@
   "env": {
     "CLAUDE_CODE_SUBAGENT_MODEL": "opus",
     "CLAUDE_CODE_DISABLE_ARTIFACT": "1",
-    "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
     "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1"
   },
   "disableClaudeAiConnectors": true,
