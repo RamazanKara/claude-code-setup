@@ -105,7 +105,11 @@ class InstallerTests(unittest.TestCase):
                 batch = settings['hooks']['PostToolBatch']
                 self.assertEqual(batch[0], other)
                 self.assertEqual([g['hooks'][0]['args'] for g in batch[1:]], [[script.as_posix()]])
-                self.assertEqual(settings['env'], {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus', 'CLAUDE_CODE_DISABLE_ARTIFACT': '1'})
+                self.assertEqual(settings['env'], {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus', 'CLAUDE_CODE_DISABLE_ARTIFACT': '1',
+                                                   'CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS': '1', 'CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS': '1'})
+                self.assertIs(settings['disableClaudeAiConnectors'], True)
+                self.assertEqual(settings['skillOverrides']['code-review'], 'user-invocable-only')
+                self.assertEqual(settings['skillOverrides']['anthropic-skills:docs'], 'off')  # not the legacy 'docs' key the cleanup drops
                 self.assertEqual(settings['advisorModel'], 'fable')
                 gate = (home / 'hooks' / 'review_gate.py').as_posix()
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['PreToolUse']],

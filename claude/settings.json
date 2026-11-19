@@ -5,7 +5,28 @@
   "subagentPromptCacheTtl": "1h",
   "env": {
     "CLAUDE_CODE_SUBAGENT_MODEL": "opus",
-    "CLAUDE_CODE_DISABLE_ARTIFACT": "1"
+    "CLAUDE_CODE_DISABLE_ARTIFACT": "1",
+    "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
+    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1"
+  },
+  "disableClaudeAiConnectors": true,
+  "skillOverrides": {
+    "code-review": "user-invocable-only",
+    "simplify": "user-invocable-only",
+    "init": "user-invocable-only",
+    "security-review": "user-invocable-only",
+    "fewer-permission-prompts": "user-invocable-only",
+    "loop": "name-only",
+    "schedule": "name-only",
+    "run": "name-only",
+    "keybindings-help": "name-only",
+    "plugin-authoring": "name-only",
+    "orca-per-workspace-env": "name-only",
+    "anthropic-skills:docx": "name-only",
+    "anthropic-skills:pptx": "name-only",
+    "anthropic-skills:xlsx": "name-only",
+    "anthropic-skills:pdf": "name-only",
+    "anthropic-skills:docs": "off"
   },
   "modelSettings": {
     "claude-fable-5-2": {
