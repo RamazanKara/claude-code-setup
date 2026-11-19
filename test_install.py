@@ -127,7 +127,9 @@ class InstallerTests(unittest.TestCase):
                                   [(home / 'hooks' / 'fresh_checkout.py').as_posix()]])
                 self.assertEqual(install.read_json(home / 'machine.json'), install.read_json(install.REPO / 'machine.example.json'))
                 self.assertEqual(settings['permissions'], {'allow': ['Read']})
-                self.assertEqual(settings['skillOverrides'], {'custom': 'on'})
+                ours = install.read_json(install.REPO / 'settings.json')['skillOverrides']
+                self.assertEqual(settings['skillOverrides'], {'custom': 'on', **ours})  # the legacy 'docs' key is gone
+                self.assertNotIn('docs', settings['skillOverrides'])
                 self.assertEqual(install.read_json(first.backup / 'settings.json'), original)
                 self.assertFalse((agents / 'old.md').exists())
                 self.assertTrue((first.backup / 'claude-agents/old.md').exists())
