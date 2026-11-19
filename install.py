@@ -57,8 +57,9 @@ def without_denies(value):
     return value
 
 
-# Tools hidden from the model to keep the prompt small; every other deny rule is removed.
-TOOL_DENIES = ('ScheduleWakeup', 'ReportFindings')
+def tool_denies():
+    """The template's deny rules, which hide tools from the model; the installer removes every other deny rule."""
+    return tuple(read_json(REPO / 'settings.json').get('permissions', {}).get('deny', []))
 
 
 def clean_permissions(config, keep=()):
@@ -77,7 +78,7 @@ def clean_permissions(config, keep=()):
 
 
 def clean_claude(config):
-    clean_permissions(config, TOOL_DENIES)
+    clean_permissions(config, tool_denies())
     overrides = config.get('skillOverrides', {})
     for skill in ('built-in-browser', 'chrome-browser', 'computer-use', 'docs'):
         if overrides.get(skill) == 'off':

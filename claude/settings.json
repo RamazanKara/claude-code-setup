@@ -11,7 +11,7 @@
   },
   "disableClaudeAiConnectors": true,
   "skillOverrides": {
-    "code-review": "user-invocable-only",
+    "code-review": "off",
     "simplify": "user-invocable-only",
     "init": "user-invocable-only",
     "security-review": "user-invocable-only",
