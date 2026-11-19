@@ -19,9 +19,10 @@ NOTE = ('You are a subagent: do not call the advisor tool unless your brief expl
 
 
 def main():
-    if os.environ.get('CLAUDE_ADVISOR_GUARD', '1') == '0' or os.environ.get('CLAUDE_CODE_DISABLE_ADVISOR_TOOL'):
+    off = os.environ.get('CLAUDE_CODE_DISABLE_ADVISOR_TOOL', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    if os.environ.get('CLAUDE_ADVISOR_GUARD', '1') == '0' or off:
         return
-    event = json.load(sys.stdin)
+    event = json.loads(sys.stdin.buffer.read().decode('utf-8', 'replace'))
     if event.get('hook_event_name', 'SubagentStart') != 'SubagentStart':
         return
     print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SubagentStart', 'additionalContext': NOTE}}))
