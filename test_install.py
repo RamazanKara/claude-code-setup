@@ -668,7 +668,7 @@ class ReviewGateTests(unittest.TestCase):
         self.write('b.rs', 200)
         self.commit('big')
         self.assertIn('Push held back', self.push())
-        env = {**self.env, 'PATH': str(bin) + os.pathsep + os.environ['PATH']}
+        env = {**self.env, 'PATH': str(bin) + os.pathsep + os.environ['PATH'], 'OC_MODEL': 'deepseek'}
         failed = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), 'review', '--dir', str(self.repo),
                                  'fail'], capture_output=True, text=True, env=env)
         self.assertEqual(failed.returncode, 1)
@@ -974,7 +974,7 @@ class OpenCodeToolTests(unittest.TestCase):
         self.bin = Path(tmp.name)
         fake_bin(self.bin)
         self.env = {**os.environ, 'PATH': str(self.bin)}
-        self.env.pop('OC_MODEL', None)
+        self.env['OC_MODEL'] = 'deepseek'  # these tests cover the DeepSeek path; Claude is the default
 
     def tool(self, *args, **kw):
         return subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), *args],
@@ -999,11 +999,13 @@ class OpenCodeToolTests(unittest.TestCase):
         self.assertIn('report: This is a coding task fr | run -m opencode-go/deepseek-v4.1-flash#max | fix it', done.stdout)
         self.assertNotIn('agent plan', done.stdout)
 
-    def test_oc_model_claude_selects_claude_only(self):
-        self.env['OC_MODEL'] = 'claude'
+    def test_claude_is_the_default_and_deepseek_is_chosen(self):
+        del self.env['OC_MODEL']
         done = self.tool('code', 'fix it')
         self.assertEqual(done.stdout.strip(), 'claude report: -p --model sonnet | fix it')
         self.assertNotIn('deepseek', done.stderr)
+        done = self.tool('read', 'find it', '--model', 'deepseek')
+        self.assertIn('run -m opencode-go/deepseek-v4.1-flash#low |', done.stdout)
 
     def test_claude_code_takes_over_when_opencode_go_is_out(self):
         done = self.tool('code', 'all out')

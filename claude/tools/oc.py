@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Hand a task to a flat-rate OpenCode model, wait, and print only its report.
+"""Hand a task to a worker model, wait, and print only its report.
 
 The files the worker reads and the code it writes never enter the caller's context; the report does.
 
-Every mode runs DeepSeek V4.1 Flash on OpenCode Go, at the effort the mode needs:
+By default Claude Code does it (Haiku for read and write, Sonnet for code and review). With --model deepseek
+or OC_MODEL=deepseek, DeepSeek V4.1 Flash on OpenCode Go does it, at the effort the mode needs:
   python oc.py read   "<brief>"   # low: a search or survey, reported with path:line
   python oc.py write  "<brief>"   # high: scaffolding, translation, a fully specified edit
   python oc.py code   "<brief>"   # max: a fix with its regression test and the checks the brief names
   python oc.py review "<brief>"   # max: reviews the checkout as the reviewer agent does; a clean
                                   # finish ("Reviewed: <path>") counts for the push hook like that agent
   brief "-" reads it from stdin; options: --dir <checkout>, --timeout <seconds, default 1800, review 2700>,
-  --effort low|high|max, --model claude|<provider/model> (default: $OC_MODEL, else DeepSeek)
+  --effort low|high|max (DeepSeek), --model claude|deepseek|<provider/model> (default: $OC_MODEL, else claude)
 
-When OpenCode Go's usage limit is reached, Claude Code takes the task (Haiku for read and write,
-Sonnet for code and review); stderr names the model that answered.
+When OpenCode Go's usage limit is reached, Claude Code takes the task; stderr names the model that answered.
 Permission prompts are answered for it; `read` and `review` run as OpenCode's Plan agent, which may not edit
 files (its shell is still allowed). Exit code 124 is the timeout (no fallback); what the model had said is printed.
 """
@@ -87,7 +87,7 @@ def attempt(model, a, prompt, title):
                    '--no-session-persistence']
     else:
         exe = shutil.which('opencode')
-        model = model if a.model else DEEPSEEK + '#' + (a.effort or MODES[a.mode][0])
+        model = DEEPSEEK + '#' + (a.effort or MODES[a.mode][0]) if model == 'deepseek' else model
         command = [exe, 'run', '-m', model, '--format', 'json', '--archived', '--auto', '--title', title]
         if a.mode in ('read', 'review'):  # OpenCode's Plan agent: file edits are denied, not only forbidden in the brief
             command += ['--agent', 'plan']
@@ -116,14 +116,14 @@ def main():
     ap.add_argument('--dir', default=None)
     ap.add_argument('--timeout', type=float, default=None, help='seconds; default 1800, review 2700')
     ap.add_argument('--effort', choices=('low', 'high', 'max'), help="DeepSeek's effort instead of the mode's")
-    ap.add_argument('--model', default=os.environ.get('OC_MODEL') or None,  # OC_MODEL=claude: Claude only
-                    help='claude, or a provider/model id instead of DeepSeek; default $OC_MODEL')
+    ap.add_argument('--model', default=os.environ.get('OC_MODEL') or 'claude',  # OC_MODEL=deepseek: OpenCode Go
+                    help='claude (default), deepseek or a provider/model id; default $OC_MODEL')
     a = ap.parse_args()
     a.timeout = a.timeout or (2700 if a.mode == 'review' else 1800)  # reviews of ~650 lines took 25-28 min
     brief = sys.stdin.read() if a.brief == '-' else a.brief
     if not brief.strip():
         sys.exit('oc.py: empty brief')
-    first = a.model or 'deepseek'
+    first = a.model
     chain = [first] if first == 'claude' else [first, 'claude']  # an error or no report: Go's limit, Claude takes it
     title = f'{a.mode}: ' + ''.join(c if c.isalnum() or c in ' -_' else ' ' for c in brief[:48]).strip()
     for n, model in enumerate(chain):
