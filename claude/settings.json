@@ -40,13 +40,13 @@
   },
   "modelSettings": {
     "claude-fable-5-2": {
-      "autoCompactWindow": 200000
+      "autoCompactWindow": 300000
     },
     "claude-opus-5-5": {
-      "autoCompactWindow": 200000
+      "autoCompactWindow": 300000
     },
     "claude-sonnet-5-5": {
-      "autoCompactWindow": 200000
+      "autoCompactWindow": 300000
     }
   },
   "autoCompactWindow": 200000,
