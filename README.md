@@ -70,7 +70,7 @@ Edit templates here before reinstalling. Keep machine-specific paths in `~/.clau
 - `codex/agents/`: GPT-6 Luna scout, runner and mechanic definitions at medium reasoning effort.
 - `antigravity/agents/`: Gemini Flash scout, runner and mechanic definitions.
 - `claude/tools/oc.py`: hands a read, write, code or review task to DeepSeek V4.1 Flash through OpenCode at the effort the task needs, or to Claude Code when Go's limit is reached; waits and prints only the report.
-- `claude/skills/issue-batch/`: a list of issues through Orca, run by Claude or by GLM 5.3 in OpenCode: one DeepSeek code worker per issue, one DeepSeek builder that cherry-picks the fixes and runs the gate once, one Opus review of the integrated range (the `reviewer` subagent when GLM orchestrates) and one landing; up to 8 code workers at once.
+- `claude/skills/issue-batch/`: a list of issues through Orca, run by Claude Code or, when Claude's usage is spent, by GLM 5.3 or DeepSeek V4.1 Flash in OpenCode: one DeepSeek code worker per issue, one DeepSeek builder that cherry-picks the fixes and runs the gate once, one review of the integrated range (Opus from Claude Code, the `reviewer` subagent from OpenCode) and one landing; up to 8 code workers at once.
 - `claude/tools/task.py`: one folder per task, a record of what a task leaves elsewhere, and the close that undoes it.
 - `claude/tools/memory_sync.py`: keeps a memory folder the same on this machine and one other, both ways, over ssh.
 - `claude/machine.example.json`: where task folders go on a machine and what is never deleted.
