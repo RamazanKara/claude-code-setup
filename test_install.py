@@ -981,6 +981,9 @@ class OpenCodeToolTests(unittest.TestCase):
         self.assertIn('trying claude', done.stderr)
         done = self.tool('read', 'all out')
         self.assertEqual(done.stdout.strip(), 'claude report: -p --model haiku | all out')
+        done = self.tool('read', 'fail', '--model', 'claude')  # asked for Claude: one run, no fallback
+        self.assertEqual(done.returncode, 1)
+        self.assertNotIn('trying', done.stderr)
 
     def test_a_timeout_ends_the_run_and_keeps_what_was_said(self):
         start = time.monotonic()

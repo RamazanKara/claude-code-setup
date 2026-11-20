@@ -119,7 +119,7 @@ def main():
     if not brief.strip():
         sys.exit('oc.py: empty brief')
     first = a.model or MODES[a.mode][0]
-    chain = FALLBACK.get(first, [first, 'claude'])
+    chain = FALLBACK.get(first, [first] if first == 'claude' else [first, 'claude'])
     title = f'{a.mode}: ' + ''.join(c if c.isalnum() or c in ' -_' else ' ' for c in brief[:48]).strip()
     for n, model in enumerate(chain):
         text, why, code = attempt(model, a, instructions(a.mode) + '\n\n' + brief, title)
