@@ -85,20 +85,27 @@ def clean_claude(config):
             del overrides[skill]
     if not overrides:
         config.pop('skillOverrides', None)
+    config.pop('advisorModel', None)  # the advisor was removed on 2026-11-20
 
 
 # event, matcher, script, its arguments
 HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
          ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
          ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)),
-         ('SubagentStart', None, 'advisor_guard.py', ()),
          ('SessionStart', None, 'tools/task.py', ('daily',)),
          ('SessionStart', None, 'fresh_checkout.py', ()))
+RETIRED_HOOKS = ('advisor_guard.py',)  # their entries go; the scripts stay for sessions started before
 TIMEOUTS = {'fresh_checkout.py': 60}  # a fetch, then a fast-forward that must not be stopped half-way
 
 
 def set_hooks(config):
     """Add this setup's hooks to settings, replacing earlier entries for the same scripts."""
+    for groups in config.get('hooks', {}).values():
+        for group in groups:
+            if isinstance(group, dict) and isinstance(group.get('hooks'), list):
+                group['hooks'] = [hook for hook in group['hooks'] if not any(name in json.dumps(hook) for name in RETIRED_HOOKS)]
+        groups[:] = [g for g in groups if not (isinstance(g, dict) and g.get('hooks') == [])]
+    config['hooks'] = {event: groups for event, groups in config.get('hooks', {}).items() if groups}
     for event, matcher, name, args in HOOKS:
         script = HOME / (name if '/' in name else 'hooks/' + name)
         entry = {'hooks': [{'type': 'command', 'command': Path(sys.executable).as_posix(),

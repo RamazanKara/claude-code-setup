@@ -1,7 +1,6 @@
 {
   "bashOutputMaxChars": 12000,
   "effortLevel": "high",
-  "advisorModel": "fable",
   "subagentPromptCacheTtl": "1h",
   "env": {
     "CLAUDE_CODE_SUBAGENT_MODEL": "opus",
