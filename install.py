@@ -267,6 +267,8 @@ class Installer:
         for src in sorted((REPO / 'tools').glob('*.py')):
             if src.name != 'deepseek.py' or OPENCODE.is_dir():  # that one hands work to OpenCode
                 self.place(src, HOME / 'tools' / src.name)
+        for src in sorted((REPO / 'skills').glob('*/SKILL.md')):
+            self.place(src, HOME / 'skills' / src.parent.name / 'SKILL.md')
         if not (HOME / 'machine.json').exists():
             print('  create  machine.json (edit it: where task folders go on this machine, what is never deleted)')
             if not self.dry:

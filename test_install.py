@@ -127,6 +127,8 @@ class InstallerTests(unittest.TestCase):
                                  [('reviewer', [gate, 'reviewed'])])
                 self.assertNotIn('SubagentStart', settings['hooks'])  # the retired advisor guard's entry is gone
                 self.assertTrue((agents / 'reviewer.md').exists())
+                skill = home / 'skills' / 'issue-batch' / 'SKILL.md'
+                self.assertEqual(skill.read_bytes(), (install.REPO / 'skills' / 'issue-batch' / 'SKILL.md').read_bytes())
                 for tool in ('deepseek.py', 'memory_sync.py', 'task.py'):
                     self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
                 self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SessionStart']],
@@ -922,6 +924,12 @@ class DeepSeekToolTests(unittest.TestCase):
         done = self.tool('write', '-', input='make "a b" & c\n')
         self.assertEqual(done.stdout.strip(),
                          'report: This is a scaffolding ta | run -m opencode-go/deepseek-v4.1-flash | make "a b" & c')
+
+    def test_a_model_name_picks_glm_or_passes_an_id_through(self):
+        done = self.tool('read', 'find it', '--model', 'glm')
+        self.assertIn('run -m opencode-go/glm-5.3 |', done.stdout)
+        done = self.tool('read', 'find it', '--model', 'opencode/deepseek-v4-pro')
+        self.assertIn('run -m opencode/deepseek-v4-pro |', done.stdout)
 
     def test_a_timeout_ends_the_run_and_keeps_what_was_said(self):
         start = time.monotonic()

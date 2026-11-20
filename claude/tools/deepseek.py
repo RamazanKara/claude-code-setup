@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hand a reading or scaffolding task to DeepSeek through OpenCode and print only its report.
+"""Hand a reading or scaffolding task to DeepSeek or GLM through OpenCode and print only its report.
 
 For an agent that needs the answer in the same turn, such as a subagent, which an Orca
 worker cannot report back to. The files DeepSeek reads and the code it writes never
@@ -8,7 +8,8 @@ enter the caller's context; the report does.
   python deepseek.py read  "<brief>"     # a survey; reports with path:line
   python deepseek.py write "<brief>"     # writes the files the brief names; reports their paths
   python deepseek.py read -              # brief on stdin
-  options: --dir <folder to work in>, --timeout <seconds, default 900>
+  options: --dir <folder to work in>, --timeout <seconds, default 900>,
+           --model flash|pro|glm|glm-flash|<provider/model> (default flash: DeepSeek V4.1 Flash)
 
 It runs in the current folder unless --dir is given, and with OpenCode's permission
 prompts answered for it: `read` is told to change nothing, not prevented from it. A run
@@ -17,7 +18,8 @@ takes from ten seconds to a few minutes, so call it with a long tool timeout. Ex
 """
 import argparse, json, os, shutil, signal, subprocess, sys
 
-MODEL = 'opencode-go/deepseek-v4.1-flash'
+MODELS = {'flash': 'opencode-go/deepseek-v4.1-flash', 'pro': 'opencode-go/deepseek-v4-pro',
+          'glm': 'opencode-go/glm-5.3', 'glm-flash': 'opencode-go/glm-5.3-flash'}
 MODES = {
     'read': 'This is a read-only task from another agent: edit, create and delete nothing, and run no builds '
             'or tests. Search first and read only what the task needs. Reply with the report alone: start each '
@@ -61,6 +63,7 @@ def main():
     ap.add_argument('brief', help='the task, or - to read it from stdin')
     ap.add_argument('--dir', default=None)
     ap.add_argument('--timeout', type=float, default=900)
+    ap.add_argument('--model', default='flash', help='flash, pro, glm, glm-flash or a provider/model id')
     a = ap.parse_args()
     brief = sys.stdin.read() if a.brief == '-' else a.brief
     if not brief.strip():
@@ -69,7 +72,7 @@ def main():
     if not opencode:
         sys.exit('deepseek.py: opencode is not on PATH')
     title = 'worker: ' + ''.join(c if c.isalnum() or c in ' -_' else ' ' for c in brief[:48]).strip()
-    command = [opencode, 'run', '-m', MODEL, '--format', 'json', '--archived', '--auto', '--title', title]
+    command = [opencode, 'run', '-m', MODELS.get(a.model, a.model), '--format', 'json', '--archived', '--auto', '--title', title]
     # The brief goes in on stdin: on Windows opencode is a .cmd shim, which mangles quotes in arguments.
     run = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                            encoding='utf-8', errors='replace', cwd=a.dir, start_new_session=os.name != 'nt')
