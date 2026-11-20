@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Opus. Independent review of a diff before it lands; use it on any change over about 60 code lines, and on smaller ones in concurrency, lifetime, protocol or release code. Give it the repository path, the commit range or "working tree", the request in the user's own words, and the path of any vendor SDK the change calls. Reports defects and missing parts of the request; never edits.
+description: Opus. Independent review of a diff before it lands; use it on any change over about 150 code lines, and on smaller ones in concurrency, lifetime, protocol, decoder or release code. Give it the repository path, the commit range or "working tree", the request in the user's own words, and the path of any vendor SDK the change calls. Reports defects and missing parts of the request; never edits.
 model: opus
 effort: high
 tools: Read, Grep, Glob, Bash

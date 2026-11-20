@@ -4,7 +4,7 @@
   review_gate.py push       PreToolUse hook on the shell tools
   review_gate.py reviewed   SubagentStop hook on the `reviewer` agent
 
-A push of fewer than CLAUDE_REVIEW_MIN_LINES changed code lines (default 60; 0 turns the
+A push of fewer than CLAUDE_REVIEW_MIN_LINES changed code lines (default 150; 0 turns the
 gate off) passes, and so does prose. Above that the push needs a note that the reviewer
 agent finished in this checkout, which it says with a last line `Reviewed: <repository>`.
 The note holds a mark for every line the change added or removed then, so a rebase onto
@@ -240,7 +240,7 @@ def reviewed(event):
 
 
 def main():
-    least = int(os.environ.get('CLAUDE_REVIEW_MIN_LINES', '60') or 0)
+    least = int(os.environ.get('CLAUDE_REVIEW_MIN_LINES', '150') or 0)
     event = json.load(sys.stdin)
     if sys.argv[1:] == ['reviewed']:
         reviewed(event)

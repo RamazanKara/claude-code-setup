@@ -705,23 +705,31 @@ class ReviewGateTests(unittest.TestCase):
         self.commit('the next task, in the same file')
         self.assertIn('no independent review has seen', self.push())
 
+    def test_a_push_below_the_default_line_count_needs_no_review(self):
+        self.write('b.rs', 149)
+        self.commit('small')
+        self.assertIsNone(self.push())
+        self.write('b.rs', 150)
+        self.commit('one line more')
+        self.assertIn('150 changed code lines in 1 files', self.push())
+
     def test_a_review_that_did_not_finish_or_saw_little_unlocks_nothing(self):
-        self.write('b.rs', 100)
+        self.write('b.rs', 200)
         self.commit('large')
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message='Interrupted before the report.'))
         self.assertIn('no independent review has seen', self.push())
         self.git('reset', '-q', '--hard', 'origin/main')
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))  # a clean tree
-        self.write('b.rs', 100)
+        self.write('b.rs', 200)
         self.commit('written after the review')
         self.assertIn('no independent review has seen', self.push())
         self.git('reset', '-q', '--hard', 'origin/main')
         self.write('b.rs', 30)
         self.write('c.rs', 20)
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))  # 50 lines seen
-        self.write('c.rs', 90)
+        self.write('c.rs', 140)
         self.commit('more than was reviewed')
-        self.assertIn('70 changed code lines came after the last review', self.push())
+        self.assertIn('120 changed code lines came after the last review', self.push())
         self.assertEqual(self.decisions(), ['review not counted', 'held', 'review ran', 'held', 'review ran', 'held'])
 
     def test_a_review_covers_the_content_it_saw_not_a_line_count(self):
@@ -813,7 +821,7 @@ class ReviewGateTests(unittest.TestCase):
         self.write('a.rs', 50)
         self.commit('a file both sides will edit')
         self.git('push', '-q', 'origin', 'HEAD:main')
-        self.write('a.rs', 150)  # ours: 100 lines at the end
+        self.write('a.rs', 250)  # ours: 200 lines at the end
         self.commit('ours')
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))
         self.git('checkout', '-q', '-b', 'theirs', 'origin/main')
@@ -824,7 +832,7 @@ class ReviewGateTests(unittest.TestCase):
         self.git('checkout', '-q', 'main')
         self.git('fetch', '-q', 'origin')
         self.git('rebase', '-q', 'origin/main')
-        self.assertEqual(len((self.repo / 'a.rs').read_text(encoding='utf-8').splitlines()), 230)
+        self.assertEqual(len((self.repo / 'a.rs').read_text(encoding='utf-8').splitlines()), 330)
         self.assertIsNone(self.push())
         self.assertEqual(self.decisions(), ['review ran', 'reviewed'])
 
