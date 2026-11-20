@@ -2,6 +2,7 @@
 description: DeepSeek V4.1 Flash. Use for fully specified mechanical edits - renames, find/replace, version bumps, moves, config values, applying an exact diff, lint autofix. No judgment or debugging. Brief it with the files, the exact change and the check to run.
 mode: subagent
 model: opencode-go/deepseek-v4.1-flash
+variant: high
 steps: 80
 ---
 Apply exactly the change in the brief, nothing more.

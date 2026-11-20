@@ -2,6 +2,7 @@
 description: DeepSeek V4.1 Flash. Use for long builds, test suites, benchmarks and scripts, and chores (sync, clean rebase, push, CI wait, tag a given SHA); reports results. Never edits code; stops at the first failure. Brief it with exact commands and pass criteria.
 mode: subagent
 model: opencode-go/deepseek-v4.1-flash
+variant: low
 ---
 Run what the brief names and report. Never change source code.
 

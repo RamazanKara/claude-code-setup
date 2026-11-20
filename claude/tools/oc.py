@@ -3,39 +3,38 @@
 
 The files the worker reads and the code it writes never enter the caller's context; the report does.
 
-  python oc.py read   "<brief>"   # DeepSeek V4.1 Flash: a search or survey, reported with path:line
-  python oc.py write  "<brief>"   # DeepSeek V4.1 Flash: scaffolding, translation, a fully specified edit
-  python oc.py code   "<brief>"   # GLM 5.3: a fix with its regression test and the checks the brief names
-  python oc.py review "<brief>"   # GLM 5.3: reviews the checkout as the reviewer agent does; a clean
+Every mode runs DeepSeek V4.1 Flash on OpenCode Go, at the effort the mode needs:
+  python oc.py read   "<brief>"   # low: a search or survey, reported with path:line
+  python oc.py write  "<brief>"   # high: scaffolding, translation, a fully specified edit
+  python oc.py code   "<brief>"   # max: a fix with its regression test and the checks the brief names
+  python oc.py review "<brief>"   # max: reviews the checkout as the reviewer agent does; a clean
                                   # finish ("Reviewed: <path>") counts for the push hook like that agent
   brief "-" reads it from stdin; options: --dir <checkout>, --timeout <seconds, default 1800, review 2700>,
-  --model flash|glm|glm-flash|<provider/model>
+  --effort low|high|max, --model claude|<provider/model>
 
-When OpenCode Go's budget for a model is out, GLM falls back to DeepSeek and DeepSeek to Claude Code
-(Haiku for read and write, Sonnet for code and review); stderr names the model that answered.
+When OpenCode Go's usage limit is reached, Claude Code takes the task (Haiku for read and write,
+Sonnet for code and review); stderr names the model that answered.
 Permission prompts are answered for it; `read` and `review` run as OpenCode's Plan agent, which may not edit
 files (its shell is still allowed). Exit code 124 is the timeout (no fallback); what the model had said is printed.
 """
 import argparse, json, os, shutil, signal, subprocess, sys
 
-MODELS = {'flash': 'opencode-go/deepseek-v4.1-flash', 'glm': 'opencode-go/glm-5.3', 'glm-flash': 'opencode-go/glm-5.3-flash'}
-# When a model's budget on OpenCode Go is out (an error or no report), the next one takes the task.
-FALLBACK = {'glm': ['glm', 'flash', 'claude'], 'glm-flash': ['glm-flash', 'flash', 'claude'], 'flash': ['flash', 'claude']}
+DEEPSEEK = 'opencode-go/deepseek-v4.1-flash'  # its variants low, high and max set the reasoning effort
 CLAUDE = {'read': 'haiku', 'write': 'haiku', 'code': 'sonnet', 'review': 'sonnet'}
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # the Claude config folder, or the repo's claude/
 REPORT = ('Reply with the report alone: start each line with the exact name and its `path:line`, '
           'and say what you could not find or do.')
 MODES = {
-    'read': ('flash', 'This is a read-only task from another agent: edit, create and delete nothing, and run no builds '
+    'read': ('low', 'This is a read-only task from another agent: edit, create and delete nothing, and run no builds '
                       'or tests. Search first and read only what the task needs. ' + REPORT),
-    'write': ('flash', 'This is a scaffolding task from another agent: write the files the task names and change nothing '
+    'write': ('high', 'This is a scaffolding task from another agent: write the files the task names and change nothing '
                        'else; run only the checks it names. Reply with the paths you wrote, one line each on what the file '
                        'holds, and what you could not do. Do not print the code.'),
-    'code': ('glm', 'This is a coding task from another agent: make the change it describes with a regression test, change '
+    'code': ('max', 'This is a coding task from another agent: make the change it describes with a regression test, change '
                     'nothing else, and run only the narrowest check that proves it plus the formatter, never a full gate. '
                     'Commit only if told to. Reply with the files you changed, one line each on what changed, the checks '
                     'you ran with their results, and what stays unverified. Do not print the code.'),
-    'review': ('glm', None),  # the reviewer agent's own instructions
+    'review': ('max', None),  # the reviewer agent's own instructions
 }
 
 
@@ -88,7 +87,8 @@ def attempt(model, a, prompt, title):
                    '--no-session-persistence']
     else:
         exe = shutil.which('opencode')
-        command = [exe, 'run', '-m', MODELS.get(model, model), '--format', 'json', '--archived', '--auto', '--title', title]
+        model = model if a.model else DEEPSEEK + '#' + (a.effort or MODES[a.mode][0])
+        command = [exe, 'run', '-m', model, '--format', 'json', '--archived', '--auto', '--title', title]
         if a.mode in ('read', 'review'):  # OpenCode's Plan agent: file edits are denied, not only forbidden in the brief
             command += ['--agent', 'plan']
     if not exe:
@@ -115,14 +115,15 @@ def main():
     ap.add_argument('brief', help='the task, or - to read it from stdin')
     ap.add_argument('--dir', default=None)
     ap.add_argument('--timeout', type=float, default=None, help='seconds; default 1800, review 2700')
-    ap.add_argument('--model', default=None, help='flash, glm, glm-flash or a provider/model id')
+    ap.add_argument('--effort', choices=('low', 'high', 'max'), help="DeepSeek's effort instead of the mode's")
+    ap.add_argument('--model', default=None, help='claude, or a provider/model id instead of DeepSeek')
     a = ap.parse_args()
-    a.timeout = a.timeout or (2700 if a.mode == 'review' else 1800)  # a GLM review of ~650 lines took ~25 min
+    a.timeout = a.timeout or (2700 if a.mode == 'review' else 1800)  # reviews of ~650 lines took 25-28 min
     brief = sys.stdin.read() if a.brief == '-' else a.brief
     if not brief.strip():
         sys.exit('oc.py: empty brief')
-    first = a.model or MODES[a.mode][0]
-    chain = FALLBACK.get(first, [first] if first == 'claude' else [first, 'claude'])
+    first = a.model or 'deepseek'
+    chain = [first] if first == 'claude' else [first, 'claude']  # an error or no report: Go's limit, Claude takes it
     title = f'{a.mode}: ' + ''.join(c if c.isalnum() or c in ' -_' else ' ' for c in brief[:48]).strip()
     for n, model in enumerate(chain):
         text, why, code = attempt(model, a, instructions(a.mode) + '\n\n' + brief, title)

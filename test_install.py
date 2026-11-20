@@ -640,7 +640,7 @@ class ReviewGateTests(unittest.TestCase):
     def push(self, command='git push origin HEAD:main', **event):
         return self.hook('push', tool_name='PowerShell', tool_input={'command': command}, **event)
 
-    def test_a_finished_glm_review_counts_like_the_reviewer_agent(self):
+    def test_a_finished_oc_review_counts_like_the_reviewer_agent(self):
         bin = self.root / 'bin'
         bin.mkdir()
         fake_bin(bin)
@@ -655,7 +655,7 @@ class ReviewGateTests(unittest.TestCase):
         done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), 'review', '--dir', str(self.repo),
                                'the request'], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('run -m opencode-go/glm-5.3', done.stdout)
+        self.assertIn('run -m opencode-go/deepseek-v4.1-flash#max', done.stdout)
         self.assertIsNone(self.push())
 
     def decisions(self):
@@ -911,7 +911,7 @@ say('step_start')
 say('text', text='looking')
 say('tool_use', tool='read')
 model = sys.argv[3] if len(sys.argv) > 3 else ''
-if last in ('fail', 'all out') or (last == 'glm out' and 'glm' in model):
+if last in ('fail', 'all out'):
     print(json.dumps({'type': 'error', 'error': {'message': 'quota reached'}}), flush=True)
     sys.exit(0)
 say('step_start')
@@ -962,30 +962,28 @@ class OpenCodeToolTests(unittest.TestCase):
         done = self.tool('read', 'find the thing')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout.strip(),
-                         'report: This is a read-only task | run -m opencode-go/deepseek-v4.1-flash | find the thing | agent plan')
+                         'report: This is a read-only task | run -m opencode-go/deepseek-v4.1-flash#low | find the thing | agent plan')
         done = self.tool('write', '-', input='make "a b" & c\n')
         self.assertEqual(done.stdout.strip(),
-                         'report: This is a scaffolding ta | run -m opencode-go/deepseek-v4.1-flash | make "a b" & c')
+                         'report: This is a scaffolding ta | run -m opencode-go/deepseek-v4.1-flash#high | make "a b" & c')
 
-    def test_a_model_name_picks_glm_or_passes_an_id_through(self):
-        done = self.tool('read', 'find it', '--model', 'glm')
-        self.assertIn('run -m opencode-go/glm-5.3 |', done.stdout)
+    def test_each_mode_sets_deepseeks_effort_and_a_model_id_passes_through(self):
+        done = self.tool('read', 'find it', '--effort', 'max')
+        self.assertIn('run -m opencode-go/deepseek-v4.1-flash#max |', done.stdout)
         self.assertIn('| find it | agent plan', done.stdout)  # read and review cannot edit files
         done = self.tool('read', 'find it', '--model', 'opencode/deepseek-v4.1-flash-free')
         self.assertIn('run -m opencode/deepseek-v4.1-flash-free |', done.stdout)
         done = self.tool('code', 'fix it')
-        self.assertIn('report: This is a coding task fr | run -m opencode-go/glm-5.3 | fix it', done.stdout)
+        self.assertIn('report: This is a coding task fr | run -m opencode-go/deepseek-v4.1-flash#max | fix it', done.stdout)
         self.assertNotIn('agent plan', done.stdout)
 
-    def test_glm_falls_back_to_deepseek_and_both_to_claude_code(self):
-        done = self.tool('code', 'glm out')
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('run -m opencode-go/deepseek-v4.1-flash | glm out', done.stdout)
-        self.assertIn('answered by flash', done.stderr)
+    def test_claude_code_takes_over_when_opencode_go_is_out(self):
         done = self.tool('code', 'all out')
+        self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout.strip(), 'claude report: -p --model sonnet | all out')
-        self.assertIn('trying flash', done.stderr)
+        self.assertIn('oc.py: deepseek: ', done.stderr)
         self.assertIn('trying claude', done.stderr)
+        self.assertIn('answered by claude', done.stderr)
         done = self.tool('read', 'all out')
         self.assertEqual(done.stdout.strip(), 'claude report: -p --model haiku | all out')
         done = self.tool('read', 'fail', '--model', 'claude')  # asked for Claude: one run, no fallback

@@ -2,6 +2,9 @@
 description: DeepSeek V4.1 Flash. Searches files, symbols, call sites, config and history; answers where/how questions with path:line evidence. Read-only. Brief it with the question and where to look.
 mode: subagent
 model: opencode-go/deepseek-v4.1-flash
+variant: low
+permission:
+  edit: deny
 steps: 60
 ---
 Answer the brief's question as cheaply as possible. Read-only: no edits, git changes, installs or builds.
