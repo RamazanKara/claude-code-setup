@@ -67,8 +67,9 @@ def scan(path, since):
                         calls[b.get('id')] = call
                         turn[2].append(call)
                         command = str(call['tool_input'].get('command', ''))
-                        if 'deepseek.py' in command:
-                            deepseek['deepseek.py runs'] += 1
+                        tool = next((t for t in ('oc.py', 'deepseek.py') if t in command), None)
+                        if tool:
+                            deepseek[f'{tool} runs'] += 1
                         elif 'worker-start' in command and 'opencode' in command:
                             deepseek['OpenCode workers'] += 1
                         if call['tool_name'] in ('Edit', 'Write', 'NotebookEdit'):
@@ -155,7 +156,7 @@ def main():
         print('  spend in streaks of single-read turns: '
               + ', '.join(f'{label} turns ${g["streak"][label]:,.0f} ({100 * g["streak"][label] / g["cost"]:.0f}%)' for _, label in STREAKS))
         if g['first']:
-            print(f'  first turn: median {sorted(g["first"])[len(g["first"]) // 2] / 1e3:.0f}k tokens of context; DeepSeek handoffs in '
+            print(f'  first turn: median {sorted(g["first"])[len(g["first"]) // 2] / 1e3:.0f}k tokens of context; OpenCode handoffs in '
                   f'{g["runs"]} runs: ' + (', '.join(f'{n} {k}' for k, n in g['deepseek'].most_common()) or 'none'))
 
 

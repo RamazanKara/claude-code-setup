@@ -161,7 +161,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertNotIn('agents', install.read_json(opencode / 'opencode.jsonc'))
                 self.assertNotIn('permissions', install.read_json(opencode / 'opencode.jsonc'))
                 flash = install.read_json(opencode / 'opencode.jsonc')['providers']['opencode-go']['models']
-                self.assertEqual(flash['glm-5.3']['body'], {'reasoning_effort': 'xhigh'})
+                self.assertEqual(flash['glm-5.3']['body'], {'reasoning_effort': 'max'})
                 self.assertEqual(flash['deepseek-v4.1-flash']['body'], {'reasoning_effort': 'max'})
                 self.assertEqual(next(iter(shared.values())).read_text(encoding='utf-8'),
                                  install.shared_rules(home / 'personal.md'))
@@ -650,6 +650,10 @@ class ReviewGateTests(unittest.TestCase):
         self.commit('big')
         self.assertIn('Push held back', self.push())
         env = {**self.env, 'PATH': str(bin) + os.pathsep + os.environ['PATH']}
+        failed = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), 'review', '--dir', str(self.repo),
+                                 'fail'], capture_output=True, text=True, env=env)
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn('Push held back', self.push())  # a review that failed unlocks nothing
         done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), 'review', '--dir', str(self.repo),
                                'the request'], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
