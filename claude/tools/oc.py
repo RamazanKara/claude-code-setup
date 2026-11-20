@@ -11,12 +11,17 @@ The files the worker reads and the code it writes never enter the caller's conte
   brief "-" reads it from stdin; options: --dir <checkout>, --timeout <seconds, default 1800>,
   --model flash|glm|glm-flash|<provider/model>
 
-It runs with OpenCode's permission prompts answered for it: `read` and `review` are told to change
-nothing, not prevented from it. Exit code 124 is the timeout; what the model had said is still printed.
+When OpenCode Go's budget for a model is out, GLM falls back to DeepSeek and DeepSeek to Claude Code
+(Haiku for read and write, Sonnet for code and review); stderr names the model that answered.
+Permission prompts are answered for it: `read` and `review` are told to change nothing, not
+prevented from it. Exit code 124 is the timeout (no fallback); what the model had said is printed.
 """
-import argparse, json, os, re, shutil, signal, subprocess, sys
+import argparse, json, os, shutil, signal, subprocess, sys
 
 MODELS = {'flash': 'opencode-go/deepseek-v4.1-flash', 'glm': 'opencode-go/glm-5.3', 'glm-flash': 'opencode-go/glm-5.3-flash'}
+# When a model's budget on OpenCode Go is out (an error or no report), the next one takes the task.
+FALLBACK = {'glm': ['glm', 'flash', 'claude'], 'glm-flash': ['glm-flash', 'flash', 'claude'], 'flash': ['flash', 'claude']}
+CLAUDE = {'read': 'haiku', 'write': 'haiku', 'code': 'sonnet', 'review': 'sonnet'}
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # the Claude config folder, or the repo's claude/
 REPORT = ('Reply with the report alone: start each line with the exact name and its `path:line`, '
           'and say what you could not find or do.')
@@ -75,6 +80,33 @@ def stop(run):
         os.killpg(run.pid, signal.SIGKILL)
 
 
+def attempt(model, a, prompt, title):
+    """One run: (report, why it failed or '', exit code). OpenCode for its models, Claude Code for 'claude'."""
+    if model == 'claude':  # OpenCode Go's budget is out: Claude Code, on the cheaper model the mode allows
+        exe = shutil.which('claude')
+        command = [exe, '-p', '--model', CLAUDE[a.mode], '--output-format', 'text', '--dangerously-skip-permissions',
+                   '--no-session-persistence']
+    else:
+        exe = shutil.which('opencode')
+        command = [exe, 'run', '-m', MODELS.get(model, model), '--format', 'json', '--archived', '--auto', '--title', title]
+    if not exe:
+        return '', ('claude' if model == 'claude' else 'opencode') + ' is not on PATH', 1
+    # The brief goes in on stdin: on Windows both are .cmd shims, which mangle quotes in arguments.
+    run = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                           encoding='utf-8', errors='replace', cwd=a.dir, start_new_session=os.name != 'nt')
+    try:
+        out, err = run.communicate(prompt, timeout=a.timeout)
+        code = run.returncode
+    except subprocess.TimeoutExpired:
+        stop(run)
+        out = run.communicate()[0]
+        err, code = f'timed out after {a.timeout:g} s', 124
+    text, failed = (out.strip(), []) if model == 'claude' else report(out.splitlines())
+    if code or failed or not text:
+        return text, '; '.join(failed or [err.strip()[-500:] or 'no report came back']), code or 1
+    return text, '', 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('mode', choices=sorted(MODES))
@@ -86,28 +118,22 @@ def main():
     brief = sys.stdin.read() if a.brief == '-' else a.brief
     if not brief.strip():
         sys.exit('oc.py: empty brief')
-    opencode = shutil.which('opencode')
-    if not opencode:
-        sys.exit('oc.py: opencode is not on PATH')
-    model = a.model or MODES[a.mode][0]
+    first = a.model or MODES[a.mode][0]
+    chain = FALLBACK.get(first, [first, 'claude'])
     title = f'{a.mode}: ' + ''.join(c if c.isalnum() or c in ' -_' else ' ' for c in brief[:48]).strip()
-    command = [opencode, 'run', '-m', MODELS.get(model, model), '--format', 'json', '--archived', '--auto', '--title', title]
-    # The brief goes in on stdin: on Windows opencode is a .cmd shim, which mangles quotes in arguments.
-    run = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                           encoding='utf-8', errors='replace', cwd=a.dir, start_new_session=os.name != 'nt')
-    try:
-        out, err = run.communicate(instructions(a.mode) + '\n\n' + brief, timeout=a.timeout)
-        code = run.returncode
-    except subprocess.TimeoutExpired:
-        stop(run)
-        out = run.communicate()[0]
-        err, code = f'timed out after {a.timeout:g} s', 124
-    text, failed = report(out.splitlines())
-    if text:
-        print(text)
-    if code or failed or not text:
-        print('oc.py: ' + '; '.join(failed or [err.strip()[-500:] or 'no report came back']), file=sys.stderr)
-        sys.exit(code or 1)
+    for n, model in enumerate(chain):
+        text, why, code = attempt(model, a, instructions(a.mode) + '\n\n' + brief, title)
+        if text and not why:
+            break
+        if code == 124 or n == len(chain) - 1:  # a timeout is the task's, not the budget's: no second run
+            if text:
+                print(text)
+            print(f'oc.py: {model}: {why}', file=sys.stderr)
+            sys.exit(code)
+        print(f'oc.py: {model}: {why}; trying {chain[n + 1]}', file=sys.stderr)
+    if model != first:
+        print(f'oc.py: answered by {model}', file=sys.stderr)
+    print(text)
     if a.mode == 'review':
         count_review(text, os.path.abspath(a.dir or os.getcwd()))
 

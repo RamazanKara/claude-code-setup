@@ -133,8 +133,7 @@ class InstallerTests(unittest.TestCase):
                 for tool in ('oc.py', 'memory_sync.py', 'task.py'):
                     self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
                 self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SessionStart']],
-                                 [[(home / 'tools' / 'task.py').as_posix(), 'daily'],
-                                  [(home / 'hooks' / 'fresh_checkout.py').as_posix()]])
+                                 [[(home / 'hooks' / 'fresh_checkout.py').as_posix()]])  # task.py daily retired 2026-11-20
                 self.assertEqual(install.read_json(home / 'machine.json'), install.read_json(install.REPO / 'machine.example.json'))
                 self.assertEqual(settings['permissions'], {'allow': ['Read'], 'deny': ['ScheduleWakeup', 'ReportFindings']})
                 ours = install.read_json(install.REPO / 'settings.json')['skillOverrides']
@@ -640,12 +639,7 @@ class ReviewGateTests(unittest.TestCase):
     def test_a_finished_glm_review_counts_like_the_reviewer_agent(self):
         bin = self.root / 'bin'
         bin.mkdir()
-        (bin / 'fake.py').write_text(FAKE_OPENCODE, encoding='utf-8')
-        if os.name == 'nt':
-            (bin / 'opencode.cmd').write_text(f'@"{sys.executable}" "{bin / "fake.py"}" %*\n', encoding='utf-8')
-        else:
-            (bin / 'opencode').write_text(f'#!/bin/sh\n"{sys.executable}" "{bin / "fake.py"}" "$@"\n', encoding='utf-8')
-            (bin / 'opencode').chmod(0o755)
+        fake_bin(bin)
         self.write('b.rs', 200)
         self.commit('big')
         self.assertIn('Push held back', self.push())
@@ -912,7 +906,8 @@ if last == 'say nothing':
 say('step_start')
 say('text', text='looking')
 say('tool_use', tool='read')
-if last == 'fail':
+model = sys.argv[3] if len(sys.argv) > 3 else ''
+if last in ('fail', 'all out') or (last == 'glm out' and 'glm' in model):
     print(json.dumps({'type': 'error', 'error': {'message': 'quota reached'}}), flush=True)
     sys.exit(0)
 say('step_start')
@@ -923,20 +918,35 @@ if last == 'sleep':
     time.sleep(60)
 '''
 
+FAKE_CLAUDE = '''
+import sys
+brief = sys.stdin.read().strip()
+last = brief.splitlines()[-1] if brief else ''
+if last in ('fail', 'say nothing'):
+    sys.exit(1)
+print('claude report: ' + ' '.join(sys.argv[1:4]) + ' | ' + last)
+'''
+
+
+def fake_bin(folder):
+    """opencode and claude stand-ins in `folder`, each behind a shim with a child process, as npm installs them."""
+    for name, source in (('opencode', FAKE_OPENCODE), ('claude', FAKE_CLAUDE)):
+        script = folder / (name + '.py')
+        script.write_text(source, encoding='utf-8')
+        if os.name == 'nt':
+            (folder / (name + '.cmd')).write_text(f'@"{sys.executable}" "{script}" %*\n', encoding='utf-8')
+        else:
+            shim = folder / name
+            shim.write_text(f'#!/bin/sh\n"{sys.executable}" "{script}" "$@"\n', encoding='utf-8')
+            shim.chmod(0o755)
+
 
 class OpenCodeToolTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.bin = Path(tmp.name)
-        fake = self.bin / 'fake.py'
-        fake.write_text(FAKE_OPENCODE, encoding='utf-8')
-        if os.name == 'nt':  # a shim with a child process, as npm installs it
-            (self.bin / 'opencode.cmd').write_text(f'@"{sys.executable}" "{fake}" %*\n', encoding='utf-8')
-        else:
-            shim = self.bin / 'opencode'
-            shim.write_text(f'#!/bin/sh\n"{sys.executable}" "{fake}" "$@"\n', encoding='utf-8')
-            shim.chmod(0o755)
+        fake_bin(self.bin)
         self.env = {**os.environ, 'PATH': str(self.bin)}
 
     def tool(self, *args, **kw):
@@ -959,6 +969,18 @@ class OpenCodeToolTests(unittest.TestCase):
         self.assertIn('run -m opencode/deepseek-v4.1-flash-free |', done.stdout)
         done = self.tool('code', 'fix it')
         self.assertIn('report: This is a coding task fr | run -m opencode-go/glm-5.3 | fix it', done.stdout)
+
+    def test_glm_falls_back_to_deepseek_and_both_to_claude_code(self):
+        done = self.tool('code', 'glm out')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('run -m opencode-go/deepseek-v4.1-flash | glm out', done.stdout)
+        self.assertIn('answered by flash', done.stderr)
+        done = self.tool('code', 'all out')
+        self.assertEqual(done.stdout.strip(), 'claude report: -p --model sonnet | all out')
+        self.assertIn('trying flash', done.stderr)
+        self.assertIn('trying claude', done.stderr)
+        done = self.tool('read', 'all out')
+        self.assertEqual(done.stdout.strip(), 'claude report: -p --model haiku | all out')
 
     def test_a_timeout_ends_the_run_and_keeps_what_was_said(self):
         start = time.monotonic()

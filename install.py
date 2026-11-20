@@ -96,9 +96,8 @@ def clean_claude(config):
 HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
          ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
          ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)),
-         ('SessionStart', None, 'tools/task.py', ('daily',)),
          ('SessionStart', None, 'fresh_checkout.py', ()))
-RETIRED_HOOKS = ('advisor_guard.py',)  # their entries go; the scripts stay for sessions started before
+RETIRED_HOOKS = ('advisor_guard.py', 'tools/task.py')  # their entries go; the scripts stay for sessions started before
 TIMEOUTS = {'fresh_checkout.py': 60}  # a fetch, then a fast-forward that must not be stopped half-way
 
 
