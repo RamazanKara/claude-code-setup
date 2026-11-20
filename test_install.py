@@ -953,6 +953,7 @@ class OpenCodeToolTests(unittest.TestCase):
         self.bin = Path(tmp.name)
         fake_bin(self.bin)
         self.env = {**os.environ, 'PATH': str(self.bin)}
+        self.env.pop('OC_MODEL', None)
 
     def tool(self, *args, **kw):
         return subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), *args],
@@ -976,6 +977,12 @@ class OpenCodeToolTests(unittest.TestCase):
         done = self.tool('code', 'fix it')
         self.assertIn('report: This is a coding task fr | run -m opencode-go/deepseek-v4.1-flash#max | fix it', done.stdout)
         self.assertNotIn('agent plan', done.stdout)
+
+    def test_oc_model_claude_selects_claude_only(self):
+        self.env['OC_MODEL'] = 'claude'
+        done = self.tool('code', 'fix it')
+        self.assertEqual(done.stdout.strip(), 'claude report: -p --model sonnet | fix it')
+        self.assertNotIn('deepseek', done.stderr)
 
     def test_claude_code_takes_over_when_opencode_go_is_out(self):
         done = self.tool('code', 'all out')

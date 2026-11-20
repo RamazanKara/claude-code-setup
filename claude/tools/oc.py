@@ -10,7 +10,7 @@ Every mode runs DeepSeek V4.1 Flash on OpenCode Go, at the effort the mode needs
   python oc.py review "<brief>"   # max: reviews the checkout as the reviewer agent does; a clean
                                   # finish ("Reviewed: <path>") counts for the push hook like that agent
   brief "-" reads it from stdin; options: --dir <checkout>, --timeout <seconds, default 1800, review 2700>,
-  --effort low|high|max, --model claude|<provider/model>
+  --effort low|high|max, --model claude|<provider/model> (default: $OC_MODEL, else DeepSeek)
 
 When OpenCode Go's usage limit is reached, Claude Code takes the task (Haiku for read and write,
 Sonnet for code and review); stderr names the model that answered.
@@ -116,7 +116,8 @@ def main():
     ap.add_argument('--dir', default=None)
     ap.add_argument('--timeout', type=float, default=None, help='seconds; default 1800, review 2700')
     ap.add_argument('--effort', choices=('low', 'high', 'max'), help="DeepSeek's effort instead of the mode's")
-    ap.add_argument('--model', default=None, help='claude, or a provider/model id instead of DeepSeek')
+    ap.add_argument('--model', default=os.environ.get('OC_MODEL') or None,  # OC_MODEL=claude: Claude only
+                    help='claude, or a provider/model id instead of DeepSeek; default $OC_MODEL')
     a = ap.parse_args()
     a.timeout = a.timeout or (2700 if a.mode == 'review' else 1800)  # reviews of ~650 lines took 25-28 min
     brief = sys.stdin.read() if a.brief == '-' else a.brief
