@@ -49,6 +49,7 @@
     }
   },
   "autoCompactWindow": 200000,
+  "autoMemoryEnabled": false,
   "permissions": {
     "deny": [
       "ScheduleWakeup",

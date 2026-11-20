@@ -120,6 +120,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(settings['skillOverrides']['code-review'], 'off')  # the reviewer agent does it; ReportFindings is denied
                 self.assertEqual(settings['skillOverrides']['anthropic-skills:docs'], 'off')  # not the legacy 'docs' key the cleanup drops
                 self.assertNotIn('advisorModel', settings)  # removed on 2026-11-20
+                self.assertIs(settings['autoMemoryEnabled'], False)  # memory off since 2026-11-20; lasting facts go in rules
                 gate = (home / 'hooks' / 'review_gate.py').as_posix()
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['PreToolUse']],
                                  [('Bash|PowerShell', [gate, 'push'])])
