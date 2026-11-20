@@ -8,7 +8,7 @@ The files the worker reads and the code it writes never enter the caller's conte
   python oc.py code   "<brief>"   # GLM 5.3: a fix with its regression test and the checks the brief names
   python oc.py review "<brief>"   # GLM 5.3: reviews the checkout as the reviewer agent does; a clean
                                   # finish ("Reviewed: <path>") counts for the push hook like that agent
-  brief "-" reads it from stdin; options: --dir <checkout>, --timeout <seconds, default 1800>,
+  brief "-" reads it from stdin; options: --dir <checkout>, --timeout <seconds, default 1800, review 2700>,
   --model flash|glm|glm-flash|<provider/model>
 
 When OpenCode Go's budget for a model is out, GLM falls back to DeepSeek and DeepSeek to Claude Code
@@ -112,9 +112,10 @@ def main():
     ap.add_argument('mode', choices=sorted(MODES))
     ap.add_argument('brief', help='the task, or - to read it from stdin')
     ap.add_argument('--dir', default=None)
-    ap.add_argument('--timeout', type=float, default=1800)
+    ap.add_argument('--timeout', type=float, default=None, help='seconds; default 1800, review 2700')
     ap.add_argument('--model', default=None, help='flash, glm, glm-flash or a provider/model id')
     a = ap.parse_args()
+    a.timeout = a.timeout or (2700 if a.mode == 'review' else 1800)  # a GLM review of ~650 lines took ~25 min
     brief = sys.stdin.read() if a.brief == '-' else a.brief
     if not brief.strip():
         sys.exit('oc.py: empty brief')
