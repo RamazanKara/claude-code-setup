@@ -17,6 +17,18 @@ from unittest.mock import patch
 
 import install
 
+# No test may reach the real ~/.codex or ~/.gemini: a test that forgets to patch them retires nothing.
+_no_real_harnesses = patch.object(install, 'RETIRED_HARNESSES', {})
+
+
+def setUpModule():
+    _no_real_harnesses.start()
+
+
+def tearDownModule():
+    _no_real_harnesses.stop()
+
+
 
 class InstallerTests(unittest.TestCase):
     def test_the_rules_stay_short(self):
@@ -185,7 +197,8 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             home = Path(tmp) / 'claude'
             home.mkdir()
-            with patch.multiple(install, HOME=home, OPENCODE=Path(tmp) / 'none', SHARED={}, RETIRED_AGENTS={}):
+            with patch.multiple(install, HOME=home, OPENCODE=Path(tmp) / 'none', SHARED={}, RETIRED_AGENTS={},
+                                RETIRED_HARNESSES={}):
                 install.Installer(False).run()
             self.assertTrue((home / 'hooks' / 'read_streak.py').exists())
             self.assertEqual(sorted(tool.name for tool in (home / 'tools').iterdir()), ['land.py', 'memory_sync.py', 'task.py', 'update_harnesses.py'])
