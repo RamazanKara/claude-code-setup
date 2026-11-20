@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Opus. A second, independent review of a diff, only when the user asks for it; the default review is `oc.py review` on GLM 5.3, which reads these same instructions. Give it the repository path, the commit range or "working tree", the request in the user's own words, and the path of any vendor SDK the change calls. Reports defects and missing parts of the request; never edits.
+description: Opus. The review of an issue batch, and a second, independent review of a diff when the user asks for one; the default review is `oc.py review` on DeepSeek V4.1 Flash, which reads these same instructions. Give it the repository path, the commit range or "working tree", the request in the user's own words, and the path of any vendor SDK the change calls. Reports defects and missing parts of the request; never edits.
 model: opus
 effort: high
 autoCompactWindow: 400000
