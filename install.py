@@ -3,9 +3,8 @@
 
 Copies CLAUDE.md, optional helper agents and the read-streak hook, merges settings.json into
 your existing one, and creates ~/.claude/personal.md from the example once. The same rules, with
-personal.md inlined, are written for every other installed agent: Codex
-(~/.codex/AGENTS.md), OpenCode (~/.config/opencode/AGENTS.md) and Antigravity
-(~/.gemini/GEMINI.md). opencode/opencode.json is merged into OpenCode's global
+personal.md inlined, are written for OpenCode (~/.config/opencode/AGENTS.md); Codex and
+Antigravity get none, and what this setup once wrote there is removed. opencode/opencode.json is merged into OpenCode's global
 config. Retired helper definitions, deny rules and workflow overrides are removed.
 Anything it replaces is backed up to ~/.claude/backups/claude-code-setup-<time>/ first.
 
@@ -23,10 +22,21 @@ REPO = ROOT / 'claude'
 _cfg = os.environ.get('CLAUDE_CONFIG_DIR')
 HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
 OPENCODE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode'
-SHARED = {
-    'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'AGENTS.md',
-    'opencode': OPENCODE / 'AGENTS.md',
-    'antigravity': Path.home() / '.gemini' / 'GEMINI.md',
+SHARED = {'opencode': OPENCODE / 'AGENTS.md'}
+# Codex and Antigravity get no workflow since 2026-11-21: the rules and agents this setup wrote there go.
+RETIRED_HARNESSES = {
+    'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex'),
+    'antigravity': Path.home() / '.gemini',
+}
+RETIRED_FILES = {  # 'rules': a file that starts with this setup's heading
+    'codex': {'AGENTS.md': 'rules',
+              'agents/mechanic.toml': 'c61b24599ef9f5b2378ec324bd3d7ae060c9cd6435d349eed44086db6f96beed',
+              'agents/runner.toml': '066984ee78aff19a6e47258ad64900efac438503a4398288e0edcbf22ed22927',
+              'agents/scout.toml': '2a32f78009a691074643711cff086a5cc7075be94259c3759713eff8e1016267'},
+    'antigravity': {'GEMINI.md': 'rules',
+                    'config/agents/mechanic.md': '9ddc7bdd0daebd0f35291c3ee4994a2d79f20b5a50961c3db63ac7b82422fd85',
+                    'config/agents/runner.md': '970bcf763cf979cfa3ccf77a926d4f846f34bf2864858f5e7d3e03813263d4b0',
+                    'config/agents/scout.md': '05de66d138ed42f3b415ca551282cb5a5e1964580327aaa798768438b5fb9a7a'},
 }
 # Only remove the definitions shipped by this setup; preserve user replacements.
 RETIRED_AGENTS = {
@@ -224,6 +234,17 @@ class Installer:
             if not self.dry:
                 dst.write_text(text, encoding='utf-8', newline='\n')
 
+    def retire_harnesses(self):
+        for harness, root in RETIRED_HARNESSES.items():
+            for rel, digest in RETIRED_FILES[harness].items():
+                dst = root / rel
+                if not dst.is_file():
+                    continue
+                text = dst.read_text(encoding='utf-8')
+                if text.startswith('# Working rules') if digest == 'rules' else hashlib.sha256(text.encode()).hexdigest() == digest:
+                    self.save(dst, harness)
+                    print(f'  remove  {label(dst)}')
+
     def retire_agents(self):
         for name, digest in RETIRED_AGENTS.items():
             harness, filename = name.split('/')
@@ -234,10 +255,6 @@ class Installer:
 
     def install_agents(self):
         targets = [('claude', HOME, HOME / 'agents'), ('opencode', OPENCODE, OPENCODE / 'agents')]
-        if 'codex' in SHARED:
-            targets.append(('codex', SHARED['codex'].parent, SHARED['codex'].parent / 'agents'))
-        if 'antigravity' in SHARED:
-            targets.append(('antigravity', SHARED['antigravity'].parent, SHARED['antigravity'].parent / 'config' / 'agents'))
         for harness, directory, agents in targets:
             if not directory.is_dir():
                 continue
@@ -265,6 +282,7 @@ class Installer:
         print(f'Installing into {HOME}' + (' (dry run)' if self.dry else ''))
         self.place(REPO / 'CLAUDE.md', HOME / 'CLAUDE.md')
         self.retire_agents()
+        self.retire_harnesses()
         self.install_agents()
         for src in sorted((REPO / 'hooks').glob('*.py')):
             self.place(src, HOME / 'hooks' / src.name)

@@ -75,9 +75,17 @@ class InstallerTests(unittest.TestCase):
             home, opencode = root / 'claude', root / 'opencode'
             home.mkdir()
             opencode.mkdir()
-            shared = {name: root / name / 'AGENTS.md' for name in ('codex', 'antigravity', 'other')}
-            for dst in shared.values():
-                dst.parent.mkdir()
+            shared = {'other': root / 'other' / 'AGENTS.md'}
+            shared['other'].parent.mkdir()
+            retired_roots = {'codex': root / 'codex', 'antigravity': root / 'antigravity'}
+            (root / 'codex' / 'agents').mkdir(parents=True)
+            (root / 'codex' / 'AGENTS.md').write_text('# Working rules\nold\n', encoding='utf-8')
+            (root / 'codex' / 'agents' / 'scout.toml').write_text('shipped\n', encoding='utf-8')
+            (root / 'codex' / 'agents' / 'mine.toml').write_text('own\n', encoding='utf-8')
+            (root / 'antigravity').mkdir()
+            (root / 'antigravity' / 'GEMINI.md').write_text('# My own notes\n', encoding='utf-8')
+            retired_files = {'codex': {'AGENTS.md': 'rules', 'agents/scout.toml': hashlib.sha256(b'shipped\n').hexdigest()},
+                             'antigravity': {'GEMINI.md': 'rules'}}
             other = {'hooks': [{'type': 'command', 'command': 'other-hook'}]}
             stale = {'hooks': [{'type': 'command', 'command': 'old-python', 'args': ['old/read_streak.py']}]}
             guard = {'hooks': [{'type': 'command', 'command': 'old-python', 'args': ['old/advisor_guard.py']}]}
@@ -98,7 +106,8 @@ class InstallerTests(unittest.TestCase):
             (home / 'tools' / 'deepseek.py').write_text('old\n', encoding='utf-8')
             retired = dict.fromkeys(('claude/old.md', 'claude/custom.md'),
                                     hashlib.sha256(b'retired\n').hexdigest())
-            with patch.multiple(install, HOME=home, OPENCODE=opencode, SHARED=shared, RETIRED_AGENTS=retired):
+            with patch.multiple(install, HOME=home, OPENCODE=opencode, SHARED=shared, RETIRED_AGENTS=retired,
+                                RETIRED_HARNESSES=retired_roots, RETIRED_FILES=retired_files):
                 dry = install.Installer(True)
                 dry.run()
                 self.assertEqual(install.read_json(home / 'settings.json'), original)
@@ -149,16 +158,15 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue((agents / 'custom.md').exists())
                 for name in ('scout', 'runner', 'mechanic'):
                     self.assertFalse((agents / (name + '.md')).exists())  # retired on 2026-11-20 for oc.py
-                for harness, directory, suffix in (
-                    ('opencode', opencode / 'agents', '.md'),
-                    ('codex', root / 'codex' / 'agents', '.toml'),
-                    ('antigravity', root / 'antigravity' / 'config' / 'agents', '.md'),
-                ):
-                    for name in ('scout', 'runner', 'mechanic'):
-                        dst = directory / (name + suffix)
-                        self.assertEqual(dst.read_bytes(),
-                                         (install.ROOT / harness / 'agents' / dst.name).read_bytes())
-                        self.assertNotIn('effect: deny', dst.read_text(encoding='utf-8'))
+                for name in ('scout', 'runner', 'mechanic', 'coder', 'reviewer'):
+                    dst = opencode / 'agents' / (name + '.md')
+                    self.assertEqual(dst.read_bytes(), (install.ROOT / 'opencode' / 'agents' / dst.name).read_bytes())
+                # Codex and Antigravity: this setup's rules and agents go, the user's own files stay
+                self.assertFalse((root / 'codex' / 'AGENTS.md').exists())
+                self.assertFalse((root / 'codex' / 'agents' / 'scout.toml').exists())
+                self.assertTrue((first.backup / 'codex' / 'scout.toml').exists())
+                self.assertTrue((root / 'codex' / 'agents' / 'mine.toml').exists())
+                self.assertEqual((root / 'antigravity' / 'GEMINI.md').read_text(encoding='utf-8'), '# My own notes\n')
                 self.assertFalse((root / 'other' / 'agents').exists())
                 self.assertEqual(install.read_json(home / 'settings.local.json'), {})
                 self.assertNotIn('agents', install.read_json(opencode / 'opencode.jsonc'))
