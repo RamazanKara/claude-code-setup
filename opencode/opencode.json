@@ -15,6 +15,7 @@
       "models": {
         "deepseek-v4.1-flash": { "body": { "reasoning_effort": "max" } },
         "gemini-4-argon": { "limit": { "context": 470000 } },
+        "glm-5.3": { "body": { "reasoning_effort": "xhigh" } },
         "kimi-k3.1-pro": { "limit": { "context": 470000 } }
       }
     }

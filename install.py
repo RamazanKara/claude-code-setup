@@ -34,6 +34,10 @@ RETIRED_AGENTS = {
     'claude/designer.md': 'c77acd7c49f9dc8b2ab05262dc7ec15e2b5e13f3247719703a17796dd16da269',
     'claude/implementer.md': 'ef1e6edbf9a7fc10760df32522ec101751ba0aa21bd3f6d7d024b6e3b66b3479',
     'claude/reviewer.md': 'f95a910b92760caf14010455f749de6936ace734bd5ae268fb7448520d1d37a3',
+    # Haiku helpers, replaced on 2026-11-20 by tools/oc.py on the flat-rate OpenCode models
+    'claude/scout.md': '48e91b389171cca16095503d6385a28e96a28a435adf76f94b3b0e46afa978c8',
+    'claude/runner.md': '015956d20c1885c9a07a50d93ffce8d0b8c98deaf3908743627054c32eece8a5',
+    'claude/mechanic.md': '80b8de644704b025bc6c22f67b8b969ddbd6a2abea1868c31585470342ba68d5',
 }
 
 
@@ -265,7 +269,7 @@ class Installer:
         for src in sorted((REPO / 'hooks').glob('*.py')):
             self.place(src, HOME / 'hooks' / src.name)
         for src in sorted((REPO / 'tools').glob('*.py')):
-            if src.name != 'deepseek.py' or OPENCODE.is_dir():  # that one hands work to OpenCode
+            if src.name != 'oc.py' or OPENCODE.is_dir():  # that one hands work to OpenCode
                 self.place(src, HOME / 'tools' / src.name)
         for src in sorted((REPO / 'skills').glob('*/SKILL.md')):
             self.place(src, HOME / 'skills' / src.parent.name / 'SKILL.md')

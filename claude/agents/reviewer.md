@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Opus. Independent review of a diff before it lands; use it on any change over about 150 code lines, and on smaller ones in concurrency, lifetime, protocol, decoder or release code. Give it the repository path, the commit range or "working tree", the request in the user's own words, and the path of any vendor SDK the change calls. Reports defects and missing parts of the request; never edits.
+description: Opus. A second, independent review of a diff, only when the user asks for it; the default review is `oc.py review` on GLM 5.3, which reads these same instructions. Give it the repository path, the commit range or "working tree", the request in the user's own words, and the path of any vendor SDK the change calls. Reports defects and missing parts of the request; never edits.
 model: opus
 effort: high
 autoCompactWindow: 400000

@@ -130,7 +130,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue((agents / 'reviewer.md').exists())
                 skill = home / 'skills' / 'issue-batch' / 'SKILL.md'
                 self.assertEqual(skill.read_bytes(), (install.REPO / 'skills' / 'issue-batch' / 'SKILL.md').read_bytes())
-                for tool in ('deepseek.py', 'memory_sync.py', 'task.py'):
+                for tool in ('oc.py', 'memory_sync.py', 'task.py'):
                     self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
                 self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SessionStart']],
                                  [[(home / 'tools' / 'task.py').as_posix(), 'daily'],
@@ -144,8 +144,9 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((agents / 'old.md').exists())
                 self.assertTrue((first.backup / 'claude-agents/old.md').exists())
                 self.assertTrue((agents / 'custom.md').exists())
+                for name in ('scout', 'runner', 'mechanic'):
+                    self.assertFalse((agents / (name + '.md')).exists())  # retired on 2026-11-20 for oc.py
                 for harness, directory, suffix in (
-                    ('claude', home / 'agents', '.md'),
                     ('opencode', opencode / 'agents', '.md'),
                     ('codex', root / 'codex' / 'agents', '.toml'),
                     ('antigravity', root / 'antigravity' / 'config' / 'agents', '.md'),
@@ -160,6 +161,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertNotIn('agents', install.read_json(opencode / 'opencode.jsonc'))
                 self.assertNotIn('permissions', install.read_json(opencode / 'opencode.jsonc'))
                 flash = install.read_json(opencode / 'opencode.jsonc')['providers']['opencode-go']['models']
+                self.assertEqual(flash['glm-5.3']['body'], {'reasoning_effort': 'xhigh'})
                 self.assertEqual(flash['deepseek-v4.1-flash']['body'], {'reasoning_effort': 'max'})
                 self.assertEqual(next(iter(shared.values())).read_text(encoding='utf-8'),
                                  install.shared_rules(home / 'personal.md'))
@@ -168,7 +170,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(second.saved)
                 self.assertFalse(second.backup.exists())
 
-    def test_the_deepseek_tool_needs_opencode(self):
+    def test_the_opencode_tool_needs_opencode(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             home = Path(tmp) / 'claude'
             home.mkdir()
@@ -196,7 +198,7 @@ class ReadStreakHookTests(unittest.TestCase):
         notes = [self.turn(('Read', '')) for _ in range(9)]
         self.assertEqual([i + 1 for i, note in enumerate(notes) if note], [3, 9])
         self.assertIn('3 read-only turns', notes[2])
-        self.assertIn('DeepSeek', notes[2])
+        self.assertIn('oc.py" read', notes[2])
 
     def test_a_batched_or_acting_turn_resets_the_streak(self):
         resets = ((('Read', ''), ('Grep', '')), (('Edit', ''),), (('PowerShell', 'cargo test | tail -5'),))
@@ -220,16 +222,14 @@ class ReadStreakHookTests(unittest.TestCase):
             notes = [self.turn(('PowerShell', command), **session) for _ in range(3)]
             self.assertEqual(bool(notes[2]), command in reads, command)
 
-    def test_streaks_are_per_agent_and_helpers_are_skipped(self):
+    def test_streaks_are_per_agent_and_helpers_are_skipped(self):  # helpers of other harnesses keep these names
         for _ in range(2):
             self.assertIsNone(self.turn(('Read', '')))
             self.assertIsNone(self.turn(('Read', ''), agent_id='a1', agent_type='general-purpose'))
         for _ in range(4):
             self.assertIsNone(self.turn(('Read', ''), agent_id='a2', agent_type='scout'))
         note = self.turn(('Read', ''), agent_id='a1', agent_type='general-purpose')
-        self.assertIn('`scout`', note)
-        self.assertNotIn('DeepSeek worker', note)
-        self.assertIn('/tools/deepseek.py" read', note)
+        self.assertIn('/tools/oc.py" read', note)
 
     def test_zero_turns_it_off_and_bad_input_stays_silent(self):
         self.env['CLAUDE_READ_STREAK'] = '0'
@@ -637,6 +637,25 @@ class ReviewGateTests(unittest.TestCase):
     def push(self, command='git push origin HEAD:main', **event):
         return self.hook('push', tool_name='PowerShell', tool_input={'command': command}, **event)
 
+    def test_a_finished_glm_review_counts_like_the_reviewer_agent(self):
+        bin = self.root / 'bin'
+        bin.mkdir()
+        (bin / 'fake.py').write_text(FAKE_OPENCODE, encoding='utf-8')
+        if os.name == 'nt':
+            (bin / 'opencode.cmd').write_text(f'@"{sys.executable}" "{bin / "fake.py"}" %*\n', encoding='utf-8')
+        else:
+            (bin / 'opencode').write_text(f'#!/bin/sh\n"{sys.executable}" "{bin / "fake.py"}" "$@"\n', encoding='utf-8')
+            (bin / 'opencode').chmod(0o755)
+        self.write('b.rs', 200)
+        self.commit('big')
+        self.assertIn('Push held back', self.push())
+        env = {**self.env, 'PATH': str(bin) + os.pathsep + os.environ['PATH']}
+        done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), 'review', '--dir', str(self.repo),
+                               'the request'], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('run -m opencode-go/glm-5.3', done.stdout)
+        self.assertIsNone(self.push())
+
     def decisions(self):
         log = self.root / 'gate.log'
         return [json.loads(line)['decision'] for line in log.read_text(encoding='utf-8').splitlines()] if log.exists() else []
@@ -879,26 +898,29 @@ class CostReportTests(unittest.TestCase):
 
 
 FAKE_OPENCODE = '''
-import json, sys, time
+import json, os, sys, time
 brief = sys.stdin.read().strip()
 def say(kind, **part):
     print(json.dumps({'type': kind, 'part': part}), flush=True)
-if 'say nothing' in brief:
+last = brief.splitlines()[-1] if brief else ''
+if last == 'say nothing':
     sys.exit(0)
 say('step_start')
 say('text', text='looking')
 say('tool_use', tool='read')
-if 'fail' in brief:
+if last == 'fail':
     print(json.dumps({'type': 'error', 'error': {'message': 'quota reached'}}), flush=True)
     sys.exit(0)
 say('step_start')
 say('text', text='report: ' + brief.splitlines()[0][:24] + ' | ' + ' '.join(sys.argv[1:4]) + ' | ' + brief.splitlines()[-1])
-if 'sleep' in brief:
+if 'Reviewed:' in brief:  # a review follows the reviewer's instructions to the end
+    say('text', text='\\nReviewed: ' + os.getcwd())
+if last == 'sleep':
     time.sleep(60)
 '''
 
 
-class DeepSeekToolTests(unittest.TestCase):
+class OpenCodeToolTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -914,7 +936,7 @@ class DeepSeekToolTests(unittest.TestCase):
         self.env = {**os.environ, 'PATH': str(self.bin)}
 
     def tool(self, *args, **kw):
-        return subprocess.run([sys.executable, str(install.REPO / 'tools' / 'deepseek.py'), *args],
+        return subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), *args],
                               capture_output=True, text=True, env=self.env, **kw)
 
     def test_prints_only_the_last_report_and_sends_the_mode_and_model(self):
@@ -929,8 +951,10 @@ class DeepSeekToolTests(unittest.TestCase):
     def test_a_model_name_picks_glm_or_passes_an_id_through(self):
         done = self.tool('read', 'find it', '--model', 'glm')
         self.assertIn('run -m opencode-go/glm-5.3 |', done.stdout)
-        done = self.tool('read', 'find it', '--model', 'opencode/deepseek-v4-pro')
-        self.assertIn('run -m opencode/deepseek-v4-pro |', done.stdout)
+        done = self.tool('read', 'find it', '--model', 'opencode/deepseek-v4.1-flash-free')
+        self.assertIn('run -m opencode/deepseek-v4.1-flash-free |', done.stdout)
+        done = self.tool('code', 'fix it')
+        self.assertIn('report: This is a coding task fr | run -m opencode-go/glm-5.3 | fix it', done.stdout)
 
     def test_a_timeout_ends_the_run_and_keeps_what_was_said(self):
         start = time.monotonic()
