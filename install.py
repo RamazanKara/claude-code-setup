@@ -97,6 +97,7 @@ HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
          ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
          ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)),
          ('SessionStart', None, 'fresh_checkout.py', ()))
+RETIRED_TOOLS = ('deepseek.py',)  # replaced by oc.py on 2026-11-20; it still offered DeepSeek Pro
 RETIRED_HOOKS = ('advisor_guard.py', 'tools/task.py')  # their entries go; the scripts stay for sessions started before
 TIMEOUTS = {'fresh_checkout.py': 60}  # a fetch, then a fast-forward that must not be stopped half-way
 
@@ -267,6 +268,8 @@ class Installer:
         self.install_agents()
         for src in sorted((REPO / 'hooks').glob('*.py')):
             self.place(src, HOME / 'hooks' / src.name)
+        for name in RETIRED_TOOLS:
+            self.save(HOME / 'tools' / name)
         for src in sorted((REPO / 'tools').glob('*.py')):
             if src.name != 'oc.py' or OPENCODE.is_dir():  # that one hands work to OpenCode
                 self.place(src, HOME / 'tools' / src.name)

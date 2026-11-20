@@ -94,6 +94,8 @@ class InstallerTests(unittest.TestCase):
             agents.mkdir()
             (agents / 'old.md').write_text('retired\n', encoding='utf-8')
             (agents / 'custom.md').write_text('user replacement\n', encoding='utf-8')
+            (home / 'tools').mkdir()
+            (home / 'tools' / 'deepseek.py').write_text('old\n', encoding='utf-8')
             retired = dict.fromkeys(('claude/old.md', 'claude/custom.md'),
                                     hashlib.sha256(b'retired\n').hexdigest())
             with patch.multiple(install, HOME=home, OPENCODE=opencode, SHARED=shared, RETIRED_AGENTS=retired):
@@ -104,7 +106,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((home / 'CLAUDE.md').exists())
                 self.assertFalse((agents / 'scout.md').exists())
                 self.assertFalse((home / 'hooks').exists())
-                self.assertFalse((home / 'tools').exists())
+                self.assertEqual([f.name for f in (home / 'tools').iterdir()], ['deepseek.py'])  # a dry run moves nothing
                 first = install.Installer(False)
                 first.run()
                 settings = install.read_json(home / 'settings.json')
@@ -130,6 +132,8 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue((agents / 'reviewer.md').exists())
                 skill = home / 'skills' / 'issue-batch' / 'SKILL.md'
                 self.assertEqual(skill.read_bytes(), (install.REPO / 'skills' / 'issue-batch' / 'SKILL.md').read_bytes())
+                self.assertFalse((home / 'tools' / 'deepseek.py').exists())  # retired for oc.py
+                self.assertTrue((first.backup / 'tools' / 'deepseek.py').exists())
                 for tool in ('oc.py', 'memory_sync.py', 'task.py'):
                     self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
                 self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SessionStart']],
@@ -676,7 +680,7 @@ class ReviewGateTests(unittest.TestCase):
         self.commit('large')
         held = self.push()
         self.assertIn('300 changed code lines in 1 files', held)
-        self.assertIn('`reviewer` agent', held)
+        self.assertIn('oc.py review --dir', held)
         self.assertIn('# REVIEW_SKIP=<reason>', held)
         self.assertIn('report this to the agent that sent you', self.push(agent_type='runner'))
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message='Clean.\nReviewed: ' + str(self.repo)))
@@ -743,12 +747,12 @@ class ReviewGateTests(unittest.TestCase):
         held = self.push(one)
         self.assertIn('299 changed code lines in 2 files', held)
         self.assertIn('push in a command of its own', held)
-        self.assertIn('`reviewer` agent', held)
+        self.assertIn('oc.py review --dir', held)
         self.assertIn('the working tree against', held)
         helper = self.push(one, agent_type='runner')
         self.assertIn('push in a command of its own', helper)
         self.assertIn('report this to the agent that sent you', helper)
-        self.assertNotIn('`reviewer` agent', helper)
+        self.assertNotIn('oc.py review', helper)
         self.assertIsNone(self.push())  # nothing is committed, so a bare push carries nothing
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))
         self.write('b.rs', 120)
@@ -911,7 +915,8 @@ if last in ('fail', 'all out') or (last == 'glm out' and 'glm' in model):
     print(json.dumps({'type': 'error', 'error': {'message': 'quota reached'}}), flush=True)
     sys.exit(0)
 say('step_start')
-say('text', text='report: ' + brief.splitlines()[0][:24] + ' | ' + ' '.join(sys.argv[1:4]) + ' | ' + brief.splitlines()[-1])
+say('text', text='report: ' + brief.splitlines()[0][:24] + ' | ' + ' '.join(sys.argv[1:4]) + ' | ' + brief.splitlines()[-1]
+    + (' | agent ' + sys.argv[sys.argv.index('--agent') + 1] if '--agent' in sys.argv else ''))
 if 'Reviewed:' in brief:  # a review follows the reviewer's instructions to the end
     say('text', text='\\nReviewed: ' + os.getcwd())
 if last == 'sleep':
@@ -957,7 +962,7 @@ class OpenCodeToolTests(unittest.TestCase):
         done = self.tool('read', 'find the thing')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout.strip(),
-                         'report: This is a read-only task | run -m opencode-go/deepseek-v4.1-flash | find the thing')
+                         'report: This is a read-only task | run -m opencode-go/deepseek-v4.1-flash | find the thing | agent plan')
         done = self.tool('write', '-', input='make "a b" & c\n')
         self.assertEqual(done.stdout.strip(),
                          'report: This is a scaffolding ta | run -m opencode-go/deepseek-v4.1-flash | make "a b" & c')
@@ -965,10 +970,12 @@ class OpenCodeToolTests(unittest.TestCase):
     def test_a_model_name_picks_glm_or_passes_an_id_through(self):
         done = self.tool('read', 'find it', '--model', 'glm')
         self.assertIn('run -m opencode-go/glm-5.3 |', done.stdout)
+        self.assertIn('| find it | agent plan', done.stdout)  # read and review cannot edit files
         done = self.tool('read', 'find it', '--model', 'opencode/deepseek-v4.1-flash-free')
         self.assertIn('run -m opencode/deepseek-v4.1-flash-free |', done.stdout)
         done = self.tool('code', 'fix it')
         self.assertIn('report: This is a coding task fr | run -m opencode-go/glm-5.3 | fix it', done.stdout)
+        self.assertNotIn('agent plan', done.stdout)
 
     def test_glm_falls_back_to_deepseek_and_both_to_claude_code(self):
         done = self.tool('code', 'glm out')

@@ -13,8 +13,8 @@ The files the worker reads and the code it writes never enter the caller's conte
 
 When OpenCode Go's budget for a model is out, GLM falls back to DeepSeek and DeepSeek to Claude Code
 (Haiku for read and write, Sonnet for code and review); stderr names the model that answered.
-Permission prompts are answered for it: `read` and `review` are told to change nothing, not
-prevented from it. Exit code 124 is the timeout (no fallback); what the model had said is printed.
+Permission prompts are answered for it; `read` and `review` run as OpenCode's Plan agent, which may not edit
+files (its shell is still allowed). Exit code 124 is the timeout (no fallback); what the model had said is printed.
 """
 import argparse, json, os, shutil, signal, subprocess, sys
 
@@ -89,6 +89,8 @@ def attempt(model, a, prompt, title):
     else:
         exe = shutil.which('opencode')
         command = [exe, 'run', '-m', MODELS.get(model, model), '--format', 'json', '--archived', '--auto', '--title', title]
+        if a.mode in ('read', 'review'):  # OpenCode's Plan agent: file edits are denied, not only forbidden in the brief
+            command += ['--agent', 'plan']
     if not exe:
         return '', ('claude' if model == 'claude' else 'opencode') + ' is not on PATH', 1
     # The brief goes in on stdin: on Windows both are .cmd shims, which mangle quotes in arguments.

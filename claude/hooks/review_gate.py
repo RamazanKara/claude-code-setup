@@ -217,9 +217,10 @@ def push(event, least):
     elif event.get('agent_type') in HELPERS:
         return deny(f'Push held back: {what}. Do not retry; report this to the agent that sent you, which must have the diff reviewed first.')
     span = f'the working tree against {base[:10]}' if tree else f'the range {base[:10]}..{tip}'
-    deny(f'Push held back: {what}. Start the `reviewer` agent with the repository path ({top}), {span} and the request this '
-         f'change answers, fix what it finds, then push again; fixes of up to {FIX_LINES} lines need no second review unless a '
-         'finding was High. Its report must end with the line `Reviewed: <repository path>` to count. If the user asked for '
+    deny(f'Push held back: {what}. Run `python ~/.claude/tools/oc.py review --dir {top} "<brief>"` in the background, the brief '
+         f'naming {span} and, in the words of the user, the request this change answers; fix what it finds, then push again; '
+         f'fixes of up to {FIX_LINES} lines need no second review unless a finding was High. A finished review counts on its '
+         'own. If the user asked for '
          'this change to go out fast, repeat the push with the comment `# REVIEW_SKIP=<reason>` at the end of the command; '
          'skips are logged.')
 
