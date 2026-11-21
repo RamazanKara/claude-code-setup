@@ -1036,6 +1036,22 @@ class OpenCodeToolTests(unittest.TestCase):
         self.assertIn('report: ', done.stdout)
         self.assertLess(time.monotonic() - start, 30)
 
+    def test_a_run_has_no_time_limit_unless_one_is_given(self):
+        spec = importlib.util.spec_from_file_location('oc_under_test', install.REPO / 'tools' / 'oc.py')
+        oc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(oc)
+        seen = []
+
+        def attempt(model, a, prompt, title):
+            seen.append(a.timeout)
+            return 'report', '', 0
+        for args in (['read'], ['code'], ['review'], ['code', '--timeout', '5']):
+            with patch.object(oc, 'attempt', attempt), patch.object(oc, 'count_review'), \
+                    patch.object(sys, 'argv', ['oc.py', *args[:1], 'brief', *args[1:]]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                oc.main()
+        self.assertEqual(seen, [None, None, None, 5])
+
     def test_fails_on_an_error_no_report_an_empty_brief_or_no_opencode(self):
         failed = self.tool('read', 'fail')
         self.assertEqual(failed.returncode, 1)

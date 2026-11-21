@@ -10,12 +10,13 @@ or OC_MODEL=deepseek, DeepSeek V4.1 Flash on OpenCode Go does it, at the effort 
   python oc.py code   "<brief>"   # max: a fix with its regression test and the checks the brief names
   python oc.py review "<brief>"   # max: reviews the checkout as the reviewer agent does; a clean
                                   # finish ("Reviewed: <path>") counts for the push hook like that agent
-  brief "-" reads it from stdin; options: --dir <checkout>, --timeout <seconds, default 1800, review 2700>,
+  brief "-" reads it from stdin; options: --dir <checkout>, --timeout <seconds, default none: it waits for the report>,
   --effort low|high|max (DeepSeek), --model claude|deepseek|<provider/model> (default: $OC_MODEL, else claude)
 
 When OpenCode Go's usage limit is reached, Claude Code takes the task; stderr names the model that answered.
 Permission prompts are answered for it; `read` and `review` run as OpenCode's Plan agent, which may not edit
-files (its shell is still allowed). Exit code 124 is the timeout (no fallback); what the model had said is printed.
+files (its shell is still allowed). Exit code 124 is a --timeout that ran out (no fallback); what the model had said
+is printed.
 """
 import argparse, json, os, shutil, signal, subprocess, sys
 
@@ -114,12 +115,11 @@ def main():
     ap.add_argument('mode', choices=sorted(MODES))
     ap.add_argument('brief', help='the task, or - to read it from stdin')
     ap.add_argument('--dir', default=None)
-    ap.add_argument('--timeout', type=float, default=None, help='seconds; default 1800, review 2700')
+    ap.add_argument('--timeout', type=float, default=None, help='seconds; default none, the run takes as long as it needs')
     ap.add_argument('--effort', choices=('low', 'high', 'max'), help="DeepSeek's effort instead of the mode's")
     ap.add_argument('--model', default=os.environ.get('OC_MODEL') or 'claude',  # OC_MODEL=deepseek: OpenCode Go
                     help='claude (default), deepseek or a provider/model id; default $OC_MODEL')
     a = ap.parse_args()
-    a.timeout = a.timeout or (2700 if a.mode == 'review' else 1800)  # reviews of ~650 lines took 25-28 min
     brief = sys.stdin.read() if a.brief == '-' else a.brief
     if not brief.strip():
         sys.exit('oc.py: empty brief')
