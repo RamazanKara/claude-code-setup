@@ -148,9 +148,16 @@ def clean_opencode(config):
             del agents['general']
     if not agents:
         config.pop('agents', None)
-    opus = config.get('providers', {}).get('anthropic', {}).get('models', {}).get('claude-opus-5-5', {})
-    if opus.get('settings') == {'thinking': {'type': 'adaptive', 'display': 'summarized'}, 'effort': 'medium'}:
-        del opus['settings']
+    # Claude runs in Claude Code, not on Anthropic's API through OpenCode: the context limits once set for it go
+    providers = config.get('providers', {})
+    models = providers.get('anthropic', {}).get('models', {})
+    for name, model in list(models.items()):
+        if model.get('settings') == {'thinking': {'type': 'adaptive', 'display': 'summarized'}, 'effort': 'medium'}:
+            del model['settings']
+        if model in ({}, {'limit': {'context': 470000}}):
+            del models[name]
+    if 'anthropic' in providers and providers['anthropic'] in ({}, {'models': {}}):
+        del providers['anthropic']
 
 
 def merge(base, extra):

@@ -109,7 +109,9 @@ class InstallerTests(unittest.TestCase):
             (home / 'settings.local.json').write_text('{"permissions":{"deny":["local"]}}', encoding='utf-8')
             (opencode / 'opencode.jsonc').write_text(
                 '// legacy\n{"agents":{"general":{"disabled":true}},'
-                '"permissions":[{"effect":"deny","action":"shell"}],}', encoding='utf-8')
+                '"permissions":[{"effect":"deny","action":"shell"}],'
+                '"providers":{"anthropic":{"models":{"claude-opus-5-5":{"limit":{"context":470000}}}}},}',
+                encoding='utf-8')
             agents = home / 'agents'
             agents.mkdir()
             (agents / 'old.md').write_text('retired\n', encoding='utf-8')
@@ -183,9 +185,15 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(install.read_json(home / 'settings.local.json'), {})
                 self.assertNotIn('agents', install.read_json(opencode / 'opencode.jsonc'))
                 self.assertNotIn('permissions', install.read_json(opencode / 'opencode.jsonc'))
-                flash = install.read_json(opencode / 'opencode.jsonc')['providers']['opencode-go']['models']
+                config = install.read_json(opencode / 'opencode.jsonc')
+                flash = config['providers']['opencode-go']['models']
                 self.assertEqual(flash['glm-5.3']['body'], {'reasoning_effort': 'max'})
                 self.assertEqual(flash['deepseek-v4.1-flash']['body'], {'reasoning_effort': 'max'})
+                # Claude only through Claude Code; never DeepSeek Pro
+                self.assertNotIn('anthropic', config['providers'])
+                denied = {p['resource'] for p in config['policies'] if p['action'] == 'provider.use' and p['effect'] == 'deny'}
+                self.assertEqual(denied, {'anthropic', 'opencode'})
+                self.assertTrue(flash['deepseek-v4-pro']['disabled'])
                 self.assertEqual(next(iter(shared.values())).read_text(encoding='utf-8'),
                                  install.shared_rules(home / 'personal.md'))
                 second = install.Installer(False)
