@@ -149,6 +149,33 @@ $out | ConvertTo-Json -Compress -Depth 4
 """
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes as w
+        k = ctypes.WinDLL('kernel32', use_last_error=True)
+        k.OpenProcess.restype, k.OpenProcess.argtypes = w.HANDLE, (w.DWORD, w.BOOL, w.DWORD)
+        k.GetExitCodeProcess.argtypes = (w.HANDLE, ctypes.POINTER(w.DWORD))
+        k.CloseHandle.argtypes = (w.HANDLE,)
+        h = k.OpenProcess(0x1000, False, pid)
+        if not h:
+            return ctypes.get_last_error() == 5
+        try:
+            code = w.DWORD()
+            return bool(k.GetExitCodeProcess(h, ctypes.byref(code)) and code.value == 259)
+        finally:
+            k.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
 def probe_local():
     info = {'host': os.environ.get('COMPUTERNAME', 'local'), 'drives': {}}
     for letter in ('C', 'D'):
@@ -160,10 +187,39 @@ def probe_local():
     busy = []
     for name in ('BUILD-LOCK', 'PRIORITY'):
         p = locks_dir / name
-        if p.is_file():
-            busy.append(f'{name}: {p.read_text(encoding="utf-8", errors="replace").strip()[:120]}')
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding='utf-8', errors='replace').strip()
+        except OSError:
+            busy.append(f'{name}: locked')
+            continue
+        if name == 'PRIORITY':
+            m = re.search(r'pid=(\d+)', text)
+            if m and not _pid_alive(int(m.group(1))):
+                continue
+        busy.append(f'{name}: {text[:120]}')
     info['busy'] = busy
     return info
+
+
+def infer_remote_repo(explicit: str | None) -> str:
+    """Infer C:\\src\\<repo> from local git origin URL when --repo was omitted."""
+    if explicit:
+        return explicit
+    try:
+        url = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
+        if url.returncode == 0 and url.stdout.strip():
+            raw = url.stdout.strip().rstrip('/').rsplit('/', 1)[-1].rsplit(':', 1)[-1]
+            name = raw[:-4] if raw.lower().endswith('.git') else raw
+            if name.lower() == 'rubylight':
+                return DEFAULT_REPO
+            if name and re.fullmatch(r'[A-Za-z0-9._-]+', name):
+                return rf'C:\src\{name}'
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return DEFAULT_REPO
 
 
 def cmd_status(args, cfg):
@@ -234,15 +290,19 @@ try {{
         git -C $Tree submodule update --init --recursive -q 2>&1 | Out-File -Append $Log -Encoding utf8
     }}
     Push-Location $Tree
+    $CmdScript = Join-Path $Work "cmd-$Name.ps1"
     try {{
+        $wrapper = $CmdText + "`r`nif (`$null -ne `$LASTEXITCODE -and `$LASTEXITCODE -ne 0) {{ exit `$LASTEXITCODE }} elseif (-not `$?) {{ exit 1 }}`r`n"
+        [IO.File]::WriteAllText($CmdScript, $wrapper, [Text.UTF8Encoding]::new($false))
         $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
         if ($pwsh) {{
-            & $pwsh.Source -NoProfile -ExecutionPolicy Bypass -Command $CmdText *>> $Log
+            & $pwsh.Source -NoProfile -ExecutionPolicy Bypass -File $CmdScript *>> $Log
         }} else {{
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $CmdText *>> $Log
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CmdScript *>> $Log
         }}
-        $Code = $LASTEXITCODE
+        $Code = if ($null -ne $LASTEXITCODE) {{ [int]$LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}
     }} finally {{
+        Remove-Item -LiteralPath $CmdScript -ErrorAction SilentlyContinue
         Pop-Location
     }}
 }} catch {{
@@ -326,9 +386,15 @@ def cmd_run(args, cfg):
         return 1
     slug = SAFE_NAME.sub('-', args.name or branch).strip('-')[:48] or 'job'
 
+    repo_path = infer_remote_repo(args.repo)
     if args.push:
         if branch in ('main', 'master'):
             print('laptop.py: refusing --push to main/master; push a wip/<topic> branch instead', file=sys.stderr)
+            return 2
+        dirty = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all'],
+                               capture_output=True, text=True, encoding='utf-8', errors='replace')
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            print('laptop.py: refusing --push with uncommitted edits to tracked files; commit them first', file=sys.stderr)
             return 2
         push = subprocess.run(['git', 'push', '--force-with-lease', 'origin', f'HEAD:refs/heads/{branch}'],
                               capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -354,7 +420,7 @@ def cmd_run(args, cfg):
         print(f'laptop.py: ssh to {target} failed: {err or out}', file=sys.stderr)
         return 1
 
-    runner_ps = build_remote_runner_ps(branch, slug, args.repo, args.work, args.locks, command, args.gpu, args.keep_worktree)
+    runner_ps = build_remote_runner_ps(branch, slug, repo_path, args.work, args.locks, command, args.gpu, args.keep_worktree)
     with tempfile.NamedTemporaryFile('w', suffix='.ps1', encoding='utf-8', newline='\n', delete=False) as tf:
         tf.write(runner_ps)
         local_runner = tf.name
@@ -375,7 +441,7 @@ def cmd_run(args, cfg):
     while True:
         code, out, err = ssh_run(ssh_cmd, target, starter_ps, timeout=45)
         if code == 0:
-            print(f'laptop.py: {out} (branch={branch}, gpu={args.gpu})', flush=True)
+            print(f'laptop.py: {out} (repo={repo_path}, branch={branch}, gpu={args.gpu})', flush=True)
             break
         if code != 4 or not args.wait or time.monotonic() > deadline:
             print(out or err or f'start failed (exit {code})', file=sys.stderr)
@@ -385,26 +451,50 @@ def cmd_run(args, cfg):
 
     shown = 0
     log_text = ''
+    completed = False
+    poll_ps = (f"$t = Get-ScheduledTask -TaskName {ps_quote(task_name)} -ErrorAction SilentlyContinue; "
+               f"$st = if ($t) {{ [string]$t.State }} else {{ 'Missing' }}; "
+               f"\"__STATE__=$st\"; "
+               f"if (Test-Path -LiteralPath {ps_quote(remote_log)}) {{ Get-Content -LiteralPath {ps_quote(remote_log)} -ErrorAction SilentlyContinue }}")
     try:
         while True:
             time.sleep(15)
-            _, text, _ = ssh_run(ssh_cmd, target, f"Get-Content -LiteralPath {ps_quote(remote_log)} -ErrorAction SilentlyContinue", timeout=30)
-            lines = text.splitlines() if text else []
+            _, raw, _ = ssh_run(ssh_cmd, target, poll_ps, timeout=30)
+            raw_lines = raw.splitlines() if raw else []
+            state = 'Unknown'
+            if raw_lines and raw_lines[0].startswith('__STATE__='):
+                state = raw_lines[0].split('=', 1)[1].strip()
+                lines = raw_lines[1:]
+            else:
+                lines = raw_lines
+            text = '\n'.join(lines)
             for line in lines[shown:]:
                 if line.startswith(('offload ', 'checked out ', '-- ', 'PASS', 'FAIL', 'ERROR', 'EXIT=')):
                     print(f'  [laptop] {line}', flush=True)
             shown = max(shown, len(lines))
             if re.search(r'(?m)^EXIT=-?\d+', text):
                 log_text = text
+                completed = True
+                break
+            if state not in ('Running', 'Queued', 'Unknown'):
+                # Re-read log once in case the task flushed EXIT= right as it exited.
+                time.sleep(2)
+                _, retry_text, _ = ssh_run(ssh_cmd, target, f"Get-Content -LiteralPath {ps_quote(remote_log)} -ErrorAction SilentlyContinue", timeout=30)
+                log_text = retry_text or text
+                completed = True
+                if not re.search(r'(?m)^EXIT=-?\d+', log_text):
+                    print(f'laptop.py: task {task_name} ended (state={state}) without writing EXIT=', file=sys.stderr)
                 break
             if time.monotonic() > deadline:
-                print(f'laptop.py: timed out after {args.timeout} min; task {task_name} is still running on laptop', file=sys.stderr)
+                print(f'laptop.py: timed out after {args.timeout} min; keeping task {task_name} registered while still running on laptop', file=sys.stderr)
                 return 1
     finally:
-        ssh_run(ssh_cmd, target,
-                f"Unregister-ScheduledTask -TaskName {ps_quote(task_name)} -Confirm:$false -ErrorAction SilentlyContinue; "
-                f"Remove-Item -LiteralPath {ps_quote(remote_script)} -ErrorAction SilentlyContinue",
-                timeout=30)
+        # Keep the scheduled task registered if still running after timeout/Ctrl+C so locks/clean see it as busy.
+        if completed:
+            ssh_run(ssh_cmd, target,
+                    f"Unregister-ScheduledTask -TaskName {ps_quote(task_name)} -Confirm:$false -ErrorAction SilentlyContinue; "
+                    f"Remove-Item -LiteralPath {ps_quote(remote_script)} -ErrorAction SilentlyContinue",
+                    timeout=30)
 
     m = re.search(r'(?m)^EXIT=(-?\d+)', log_text)
     exit_code = int(m.group(1)) if m else 1
@@ -471,8 +561,8 @@ if ($Apply) {{
 $freeGb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
 $prunedPool = $false
 if ($Apply -and $freeGb -lt $PruneUnder -and (Test-Path -LiteralPath (Join-Path $Repo 'tools\\build_lock.py'))) {{
-  python (Join-Path $Repo 'tools\\build_lock.py') --prune 2>&1 | Out-Null
-  $prunedPool = $true
+  python (Join-Path $Repo 'tools\\build_lock.py') --prune --min-free-gb $PruneUnder 2>&1 | Out-Null
+  $prunedPool = ($LASTEXITCODE -eq 0)
   $freeGb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
 }}
 [ordered]@{{
@@ -522,7 +612,7 @@ def main():
     rn.add_argument('--push', action='store_true', help='push local HEAD to origin/<branch> first (refuses main/master)')
     rn.add_argument('--wait', action='store_true', help='wait for the laptop to become free instead of exiting 4')
     rn.add_argument('--timeout', type=int, default=120, help='timeout in minutes (default 120)')
-    rn.add_argument('--repo', default=DEFAULT_REPO)
+    rn.add_argument('--repo', default=None, help='remote repo path (default: inferred C:\\src\\<origin-name>, fallback C:\\src\\Rubylight)')
     rn.add_argument('--work', default=DEFAULT_WORK)
     rn.add_argument('--locks', default=DEFAULT_LOCKS)
     rn.add_argument('--pool', default=DEFAULT_POOL)

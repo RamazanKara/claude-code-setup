@@ -35,16 +35,20 @@ SKIP = re.compile(r'POOL_SKIP\s*[=:]\s*[\'"]?([^\'";\n]+)', re.I)
 BLOCKS = re.compile(r'<<-?[ \t]*([\'"]?)(\w+)\1[^\n]*\n.*?^[ \t]*\2[ \t]*$|@([\'"])[ \t]*\r?\n.*?^\3@', re.S | re.M)
 TEXT = re.compile(r'(?<!\S)#[^\n]*|"(?:\\.|`.|[^"\\`])*"|\'[^\']*\'')
 
-GRADLEW = re.compile(r'(?:^|[\s"\'`/\\])gradlew(?:\.bat)?\b', re.I)
+GRADLEW = re.compile(
+    r'(?:' + START + r'|\s--\s+|\b(?:if|while)\s+|\bcmd(?:\.exe)?\s+/[ck]\s+|&\s+)'
+    r'(?:[A-Za-z_]\w*=\S*\s+|(?:time|env|nice|nohup|exec)\s+)*'
+    r'(?:[^\s;&|()]*[\\/])?gradlew(?:\.bat)?\b', re.I)
 GRADLE_LOCKED = re.compile(r'\btools[\\/]+build_lock\.py\b[^\n;|&]*(?:--lane\s+gradle\b|--lock-directory\b)', re.I)
 GRADLE_NO_DAEMON = re.compile(r'--no-daemon\b', re.I)
 DEV_TOOL = re.compile(r'\btools[\\/]+dev\.(?:ps1|py)\b', re.I)
 
+LOOPBACK = r'(?:127\.0\.0\.1|localhost|\[::1\]|::1)'
 WILDCARD_HTTP_SERVER = re.compile(
-    r'\bpython(?:\.exe)?\b[^\n;|&]*\s-m\s+http\.server\b(?![^\n;|&]*(?:-b|--bind)\s+(?:127\.0\.0\.1|localhost|::1)\b)',
+    r'\bpython(?:\.exe)?\b[^\n;|&]*\s-m\s+http\.server\b(?![^\n;|&]*(?:-b|--bind)(?:\s+|=)' + LOOPBACK + r'(?=$|[\s;&|<>]))',
     re.I)
 WILDCARD_VITE_HOST = re.compile(
-    r'\b(?:vite|npm(?:\.cmd)?\s+run\s+(?:dev|preview))\b[^\n;|&]*--host(?:\s+0\.0\.0\.0\b|\s*=\s*0\.0\.0\.0\b|\s*$|\s+-)',
+    r'\b(?:vite|npm(?:\.cmd)?\s+run\s+(?:dev|preview))\b[^\n;|&]*--host(?!(?:\s+|=)' + LOOPBACK + r'(?=$|[\s;&|<>]))(?=$|[\s=;&|<>])',
     re.I)
 
 

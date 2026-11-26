@@ -21,14 +21,15 @@ import argparse, os, shutil, signal, subprocess, sys, tempfile
 
 CLAUDE_MODELS = {'read': 'haiku', 'write': 'sonnet', 'code': 'sonnet', 'review': 'opus'}
 CLAUDE_EFFORT = {'read': 'low', 'write': 'medium', 'code': 'high', 'review': 'high'}
-AGY_MODELS = {
-    'read': 'gemini-4-hydrogen-low',
-    'write': 'gemini-4-hydrogen-high',
-    'code': 'gemini-4-neon-xhigh',
-    'review': 'gemini-4-carbon-high',
+AGY_BASES = {
+    'read': ('gemini-4-hydrogen', ('low', 'medium', 'high', 'xhigh')),
+    'write': ('gemini-4-hydrogen', ('low', 'medium', 'high', 'xhigh')),
+    'code': ('gemini-4-neon', ('low', 'medium', 'high', 'xhigh')),
+    'review': ('gemini-4-carbon', ('low', 'medium', 'high')),
 }
 AGY_EFFORT = {'read': 'low', 'write': 'high', 'code': 'xhigh', 'review': 'high'}
 READONLY_DISALLOWED = ['Write', 'Edit', 'NotebookEdit']
+ORCA_PARENT_ENV = ('ORCA_AGENT_SESSION_ID', 'ORCA_AGENT_SESSION_SPAWN_TOKEN', 'ORCA_PANE_KEY')
 AGY_INLINE_LIMIT = 20_000  # bytes; larger prompts go through a temp file cleaned in finally
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,6 +81,18 @@ def stop(run):
         os.killpg(run.pid, signal.SIGKILL)
 
 
+def resolve_agy_model_effort(mode, model_override, effort_override):
+    """Pick matching Antigravity model ID and effort tier (clamping Carbon to high and max -> xhigh)."""
+    effort = effort_override or AGY_EFFORT[mode]
+    if model_override:
+        return model_override, effort
+    base, tiers = AGY_BASES[mode]
+    tier = 'xhigh' if effort == 'max' else effort
+    if tier not in tiers:
+        tier = tiers[-1]
+    return f'{base}-{tier}', tier
+
+
 def build_command(harness, args, prompt, prompt_file=None):
     """Return (argv, stdin_text_or_None, exe_name) for the chosen harness."""
     if harness == 'claude':
@@ -97,8 +110,7 @@ def build_command(harness, args, prompt, prompt_file=None):
     exe = shutil.which('agy')
     if not exe:
         return None, None, 'agy'
-    model = args.model or AGY_MODELS[args.mode]
-    effort = args.effort or AGY_EFFORT[args.mode]
+    model, effort = resolve_agy_model_effort(args.mode, args.model, args.effort)
     # Note: do NOT pass --disable-slash-commands with --mode plan (agy warns it disables plan mode).
     mode_flag = 'plan' if args.mode in ('read', 'review') else 'auto'
     prompt_arg = (f'Read and follow every instruction in "{prompt_file}" verbatim.'
@@ -108,9 +120,17 @@ def build_command(harness, args, prompt, prompt_file=None):
     return cmd, None, 'agy'
 
 
+def _strip_orca_parent_env(env):
+    """Strip interactive Orca pane/session hook env vars so child worker runs never trigger parent pane hooks."""
+    for key in list(env):
+        if key in ORCA_PARENT_ENV or key.startswith('ORCA_AGENT_HOOK'):
+            env.pop(key, None)
+    return env
+
+
 def claude_env():
     """Return child env for `claude -p`, resolving Orca's active Claude profile when CLAUDE_CONFIG_DIR is unset."""
-    env = dict(os.environ)
+    env = _strip_orca_parent_env(dict(os.environ))
     if env.get('CLAUDE_CONFIG_DIR'):
         return env
     orca = env.get('ORCA_USER_DATA_PATH') or (os.path.join(env['APPDATA'], 'orca') if env.get('APPDATA') else '')
@@ -130,6 +150,11 @@ def claude_env():
     return env
 
 
+def agy_env():
+    """Return child env for `agy --print` with parent Orca pane/session hook vars stripped."""
+    return _strip_orca_parent_env(dict(os.environ))
+
+
 def execute(harness, args, prompt):
     """Run one worker invocation and return (report_text, error_reason, exit_code)."""
     prompt_file = None
@@ -145,7 +170,7 @@ def execute(harness, args, prompt):
         cmd, stdin_text, exe_name = build_command(harness, args, prompt, prompt_file)
         if not cmd:
             return '', f'{exe_name} is not on PATH', 1
-        child_env = claude_env() if harness == 'claude' else None
+        child_env = claude_env() if harness == 'claude' else agy_env()
         run = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,

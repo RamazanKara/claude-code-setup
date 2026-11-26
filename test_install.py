@@ -296,6 +296,8 @@ class FreshCheckoutTests(unittest.TestCase):
         self.sessions.mkdir(parents=True)
         self.env['CLAUDE_CONFIG_DIR'] = str(self.root / 'config')
         self.env['USERPROFILE'] = self.env['HOME'] = str(self.root)  # a terminal session's ~/.claude/sessions
+        self.env['ORCA_USER_DATA_PATH'] = str(self.root / 'no-orca')
+        self.env['APPDATA'] = str(self.root / 'no-appdata')
         subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.root / 'origin.git')], check=True, env=self.env)
         self.other, self.repo = self.root / 'other', self.root / 'work'
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.other)], check=True, env=self.env)
@@ -455,6 +457,19 @@ class FreshCheckoutTests(unittest.TestCase):
         self.assertEqual((done2.returncode, done2.stderr), (0, ''))
         out = json.loads(done2.stdout)
         self.assertIn('fast-forwarded', out['injectSteps'][0]['systemMessage']['systemMessage'])
+        # Orca Claude profile live session blocks Antigravity from fast-forwarding underneath it
+        live = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.addCleanup(live.wait)
+        self.addCleanup(live.kill)
+        orca_dir = self.root / 'orca-data'
+        prof_sess = orca_dir / 'claude-profiles' / 'p1' / 'home' / 'sessions'
+        self.session(live.pid, self.repo, sid='orca-live', folder=prof_sess)
+        self.land('AGENTS.md', 'blocked rule\n')
+        done3 = subprocess.run([sys.executable, str(self.HOOK)], input=json.dumps(ag_event),
+                               capture_output=True, text=True, env={**self.env, 'ORCA_USER_DATA_PATH': str(orca_dir)})
+        self.assertEqual((done3.returncode, done3.stderr), (0, ''))
+        msg3 = json.loads(done3.stdout)['injectSteps'][0]['systemMessage']['systemMessage']
+        self.assertIn('1 other live session works in it', msg3)
 
 
 class LandToolTests(unittest.TestCase):
@@ -1014,15 +1029,22 @@ class CargoPoolHookTests(unittest.TestCase):
     def test_gradle_lane_firewall_and_combined_pre_bash_dispatcher(self):
         (self.pool / 'tools' / 'build_lock.py').write_text('', encoding='utf-8')
         for bad in (r'client\gradlew.bat -p client :app:testNonRootDebugUnitTest',
+                    r'cmd /c client\gradlew.bat -p client assembleNonRootDebug',
                     r'python tools/build_lock.py --lane gradle -- cmd /c client\gradlew.bat -p client assembleNonRootDebug',
                     'python -m http.server 8000',
                     'npx vite --host',
+                    'npx vite --host > vite.log 2>&1',
                     'npm run dev -- --host 0.0.0.0'):
             said = self.hook(bad)
             self.assertEqual(said and said['permissionDecision'], 'deny', bad)
         for ok in (r'python tools/build_lock.py --lane gradle --label nj -- cmd /c client\gradlew.bat -p client --no-daemon assembleNonRootDebug',
+                   'git diff client/gradlew.bat',
+                   'rg "gradlew" tools/',
                    'python -m http.server 8000 --bind 127.0.0.1',
+                   'python -m http.server --bind=127.0.0.1 8000',
+                   'python -m http.server --bind [::1] 8000',
                    'npx vite preview --host 127.0.0.1',
+                   'npx vite --host=[::1]',
                    'python -m http.server 8000  # POOL_SKIP=lan test'):
             self.assertIsNone(self.hook(ok), ok)
         # Combined pre_bash.py catches cargo_pool violations in one process (Claude Code format).
@@ -1188,12 +1210,20 @@ class WorkerToolTests(unittest.TestCase):
             prof = orca / 'claude-profiles' / 'p1' / 'home'
             prof.mkdir(parents=True)
             (orca / 'claude-profiles' / 'selected-host').write_text(str(prof) + '\n', encoding='utf-8')
-            with patch.dict(os.environ, {'ORCA_USER_DATA_PATH': str(orca)}, clear=False):
+            with patch.dict(os.environ, {'ORCA_USER_DATA_PATH': str(orca), 'ORCA_AGENT_SESSION_ID': 'parent-1',
+                                         'ORCA_PANE_KEY': 'pane-1', 'ORCA_AGENT_HOOK_X': '1'}, clear=False):
                 os.environ.pop('CLAUDE_CONFIG_DIR', None)
                 resolved = mod.claude_env()
                 self.assertEqual(resolved.get('CLAUDE_CONFIG_DIR'), str(prof))
+                for k in ('ORCA_AGENT_SESSION_ID', 'ORCA_PANE_KEY', 'ORCA_AGENT_HOOK_X'):
+                    self.assertNotIn(k, resolved)
+                    self.assertNotIn(k, mod.agy_env())
             with patch.dict(os.environ, {'ORCA_USER_DATA_PATH': str(orca), 'CLAUDE_CONFIG_DIR': 'explicit'}, clear=False):
                 self.assertEqual(mod.claude_env().get('CLAUDE_CONFIG_DIR'), 'explicit')
+        # Antigravity model tier tracks --effort (clamping Carbon to high)
+        self.assertEqual(mod.resolve_agy_model_effort('review', None, 'medium'), ('gemini-4-carbon-medium', 'medium'))
+        self.assertEqual(mod.resolve_agy_model_effort('review', None, 'xhigh'), ('gemini-4-carbon-high', 'high'))
+        self.assertEqual(mod.resolve_agy_model_effort('code', None, 'max'), ('gemini-4-neon-xhigh', 'xhigh'))
 
 
 class LaptopToolTests(unittest.TestCase):
@@ -1214,6 +1244,17 @@ class LaptopToolTests(unittest.TestCase):
                                                  r'C:\src\butterpollo-release', 'tools\\dev.ps1 check', False, True)
         self.assertIn('$UseGpu = $false', cpu_ps)
         self.assertIn('$KeepWorktree = $true', cpu_ps)
+        # End-to-end verification that PowerShell preserves exit code 3 (AMD encoder hang sentinel) via -File wrapper.
+        pwsh = shutil.which('pwsh') or shutil.which('powershell')
+        if pwsh:
+            with tempfile.TemporaryDirectory() as tmp:
+                cmd_script = Path(tmp) / 'cmd-test.ps1'
+                cmd_text = f'& "{sys.executable}" -c "import sys; sys.exit(3)"'
+                wrapper = cmd_text + '\nif ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 }\n'
+                cmd_script.write_text(wrapper, encoding='utf-8')
+                res = subprocess.run([pwsh, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(cmd_script)],
+                                     capture_output=True, text=True)
+                self.assertEqual(res.returncode, 3)
 
     def test_refuses_push_to_main_and_parses_status_json(self):
         self_run = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'laptop.py'),
@@ -1625,8 +1666,11 @@ class TaskToolTests(unittest.TestCase):
         alive_ws = ws_root / 'repo' / 'live-one'
         alive_ws.mkdir(parents=True)
         alive_slug = re.sub(r'[:\\/._]', '-', os.path.abspath(str(alive_ws)))
+        alive_sub_slug = alive_slug + '-client'  # subdirectory inside a live Orca workspace
         dead_slug = re.sub(r'[:\\/._]', '-', os.path.abspath(str(ws_root / 'repo' / 'deleted-ws')))
         (proj / alive_slug).mkdir(parents=True)
+        (proj / alive_sub_slug).mkdir(parents=True)
+        (proj / alive_sub_slug / 'live.jsonl').write_text('keep\n', encoding='utf-8')
         (proj / dead_slug).mkdir(parents=True)
         (proj / dead_slug / 'old.jsonl').write_text('x' * 500, encoding='utf-8')
         main_proj = proj / 'C--src-demo'
@@ -1652,23 +1696,29 @@ class TaskToolTests(unittest.TestCase):
         self.assertEqual(applied.returncode, 0, applied.stderr)
         self.assertFalse((proj / dead_slug).exists())
         self.assertTrue((proj / alive_slug).exists())
+        self.assertTrue((proj / alive_sub_slug / 'live.jsonl').exists())
         self.assertFalse(old_tx.exists())
         self.assertTrue(new_tx.exists())
         self.assertTrue(mem.exists())
 
-        # Antigravity session pruning preserves active conversationId and recent entries
+        # Antigravity session pruning preserves active conversationId, recent entries, AND multi-day live brain/<cid>
+        # whose nested .system_generated/logs or paired conversations/<cid>.db is recent.
         gdir = self.root / 'gemini-cli'
         (gdir / 'conversations').mkdir(parents=True)
         (gdir / 'brain' / 'old-cid').mkdir(parents=True)
         (gdir / 'brain' / 'active-cid').mkdir(parents=True)
+        (gdir / 'brain' / 'nested-cid' / '.system_generated' / 'logs').mkdir(parents=True)
         old_db = gdir / 'conversations' / 'old-cid.db'
         active_db = gdir / 'conversations' / 'active-cid.db'
+        nested_db = gdir / 'conversations' / 'nested-cid.db'
         fresh_db = gdir / 'conversations' / 'fresh-cid.db'
-        for p in (old_db, active_db, fresh_db, gdir / 'brain' / 'old-cid' / 'a.txt', gdir / 'brain' / 'active-cid' / 'a.txt'):
+        nested_log = gdir / 'brain' / 'nested-cid' / '.system_generated' / 'logs' / 'transcript.jsonl'
+        for p in (old_db, active_db, nested_db, fresh_db,
+                  gdir / 'brain' / 'old-cid' / 'a.txt', gdir / 'brain' / 'active-cid' / 'a.txt', nested_log):
             p.write_text('data\n', encoding='utf-8')
         old_t = time.time() - 5 * 86400
-        for p in (old_db, active_db, gdir / 'brain' / 'old-cid' / 'a.txt', gdir / 'brain' / 'old-cid',
-                  gdir / 'brain' / 'active-cid' / 'a.txt', gdir / 'brain' / 'active-cid'):
+        for p in (old_db, active_db, nested_db, gdir / 'brain' / 'old-cid' / 'a.txt', gdir / 'brain' / 'old-cid',
+                  gdir / 'brain' / 'active-cid' / 'a.txt', gdir / 'brain' / 'active-cid', gdir / 'brain' / 'nested-cid'):
             os.utime(p, (old_t, old_t))
         g_env = {**self.env, 'ANTIGRAVITY_CONVERSATION_ID': 'active-cid'}
         g_done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'task.py'),
@@ -1680,6 +1730,8 @@ class TaskToolTests(unittest.TestCase):
         self.assertFalse((gdir / 'brain' / 'old-cid').exists())
         self.assertTrue(active_db.exists())
         self.assertTrue((gdir / 'brain' / 'active-cid').exists())
+        self.assertTrue(nested_db.exists())  # paired with recent nested brain log!
+        self.assertTrue(nested_log.exists())
         self.assertTrue(fresh_db.exists())
 
 

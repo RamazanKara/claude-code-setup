@@ -28,15 +28,22 @@ _cfg = os.environ.get('CLAUDE_CONFIG_DIR')
 HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
 GEMINI = Path.home() / '.gemini' / 'config'
 GEMINI_HOOK_GROUP = 'workflow-guards'
-# Codex gets no workflow: the rules and agents this setup once wrote there go.
+# Codex and OpenCode get no workflow: the rules and agents this setup once wrote there go (backed up).
 RETIRED_HARNESSES = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex'),
+    'opencode': Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode',
 }
 RETIRED_FILES = {  # 'rules': a file that starts with this setup's heading
     'codex': {'AGENTS.md': 'rules',
               'agents/mechanic.toml': 'c61b24599ef9f5b2378ec324bd3d7ae060c9cd6435d349eed44086db6f96beed',
               'agents/runner.toml': '066984ee78aff19a6e47258ad64900efac438503a4398288e0edcbf22ed22927',
               'agents/scout.toml': '2a32f78009a691074643711cff086a5cc7075be94259c3759713eff8e1016267'},
+    'opencode': {'AGENTS.md': 'rules',
+                 'agents/coder.md': '51c5b1e24a147b8d3b3755ebbc774f73168a058ebdbbb6b663fe40913d24f7d4',
+                 'agents/mechanic.md': '865722c53554ecc312707ca97c813d13d14c852e472a75d32f34d484d1d0d912',
+                 'agents/reviewer.md': 'c64380847fe2dc07797fe5c7e9c4dc6bede168b6fb0d174cb5bd2ebe76891bb2',
+                 'agents/runner.md': '7127eb61a688605ceab0a2ad6911882614c14b18a77c28be741405f988d4ddfb',
+                 'agents/scout.md': '996f4d63c53010df035128dc629fd3713039f8e8f3a63745a607504a25d3005f'},
 }
 # Only remove legacy definitions shipped by this setup; preserve user replacements and current agents.
 RETIRED_AGENTS = {

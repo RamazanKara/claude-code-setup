@@ -97,8 +97,12 @@ def alive(pid, started=None):
 
 def others_in(top, me, transcript=None):
     """Live sessions other than this one whose folder lies in the checkout; None when that cannot be known. The
-    config folders read: CLAUDE_CONFIG_DIR, ~/.claude, and the one this session's transcript lies in."""
+    config folders read: CLAUDE_CONFIG_DIR, ~/.claude, Orca's claude-profiles, and the one this session's transcript lies in."""
     homes = [os.environ.get('CLAUDE_CONFIG_DIR'), os.path.expanduser('~/.claude')]
+    orca = os.environ.get('ORCA_USER_DATA_PATH') or (os.path.join(os.environ['APPDATA'], 'orca') if os.environ.get('APPDATA') else '')
+    if orca:
+        for prof in glob.glob(os.path.join(orca, 'claude-profiles', '*', 'home')):
+            homes.append(prof)
     parts = os.path.normpath(transcript).split(os.sep) if transcript else []
     if len(parts) > 3 and parts[-3].lower() == 'projects':
         homes.append(os.sep.join(parts[:-3]))

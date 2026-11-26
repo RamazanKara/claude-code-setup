@@ -890,26 +890,46 @@ def caches(cfg, days, apply, as_json):
     print(f'freed {freed / 1e9:.2f} GB, {len(failed)} failed')
 
 
+def _claude_session_dirs(claude_home):
+    """Return every live Claude sessions/ folder: claude_home, CLAUDE_CONFIG_DIR, ~/.claude, and Orca Claude profiles."""
+    homes = [claude_home, os.environ.get('CLAUDE_CONFIG_DIR'), os.path.expanduser('~/.claude')]
+    orca = os.environ.get('ORCA_USER_DATA_PATH') or (os.path.join(os.environ['APPDATA'], 'orca') if os.environ.get('APPDATA') else '')
+    if orca:
+        profiles = os.path.join(orca, 'claude-profiles')
+        if os.path.isdir(profiles):
+            for entry in entries(profiles):
+                if entry.is_dir(follow_symlinks=False):
+                    homes.append(os.path.join(entry.path, 'home'))
+    seen, dirs = set(), []
+    for h in homes:
+        if not h:
+            continue
+        sdir = os.path.join(h, 'sessions')
+        key = real(sdir)
+        if key not in seen and os.path.isdir(sdir):
+            seen.add(key)
+            dirs.append(sdir)
+    return dirs
+
+
 def _live_sessions(claude_home):
-    """Return (active_session_ids, active_cwds) for currently running Claude Code processes."""
+    """Return (active_session_ids, active_cwds) for currently running Claude Code processes (incl. Orca profiles)."""
     sids, cwds = set(), set()
-    sdir = os.path.join(claude_home, 'sessions')
-    if not os.path.isdir(sdir):
-        return sids, cwds
-    for entry in entries(sdir):
-        if not entry.name.endswith('.json'):
-            continue
-        try:
-            with open(entry.path, encoding='utf-8') as f:
-                data = json.load(f)
-            pid = int(data.get('pid', 0))
-        except (OSError, ValueError, TypeError):
-            continue
-        if pid and process(pid) is not None:
-            if data.get('sessionId'):
-                sids.add(str(data['sessionId']))
-            if data.get('cwd'):
-                cwds.add(real(data['cwd']))
+    for sdir in _claude_session_dirs(claude_home):
+        for entry in entries(sdir):
+            if not entry.name.endswith('.json'):
+                continue
+            try:
+                with open(entry.path, encoding='utf-8') as f:
+                    data = json.load(f)
+                pid = int(data.get('pid', 0))
+            except (OSError, ValueError, TypeError):
+                continue
+            if pid and process(pid) is not None:
+                if data.get('sessionId'):
+                    sids.add(str(data['sessionId']))
+                if data.get('cwd'):
+                    cwds.add(real(data['cwd']))
     return sids, cwds
 
 
@@ -933,14 +953,38 @@ def _existing_orca_keys(workspaces_root):
     return keys
 
 
+def _newest_recursive(folder):
+    """Newest mtime anywhere inside `folder` (Antigravity writes logs/steps at depth 2-3 inside brain/<cid>)."""
+    latest = 0.0
+    try:
+        latest = os.lstat(folder).st_mtime
+    except OSError:
+        return 0.0
+    for dirpath, dirnames, filenames in os.walk(folder, topdown=True):
+        dirnames[:] = [d for d in dirnames if not linked(os.path.join(dirpath, d))]
+        for name in filenames:
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+                if st.st_mtime > latest:
+                    latest = st.st_mtime
+            except OSError:
+                continue
+    return latest
+
+
 def _scan_gemini_sessions(gemini_dir, gemini_days):
-    """Scan ~/.gemini/antigravity-cli/{conversations,brain} for size and stale items (>gemini_days)."""
+    """Scan ~/.gemini/antigravity-cli/{conversations,brain} for size and stale items (>gemini_days).
+
+    Pairs `conversations/<cid>.db*` with `brain/<cid>/` so a live or recently updated session's
+    `brain/<cid>` is never deleted while its `.db` is open/recent or has recent nested turns.
+    """
     root = gemini_dir or os.path.expanduser(os.path.join('~', '.gemini', 'antigravity-cli'))
     if not os.path.isdir(root):
         return {'exists': False, 'total_bytes': 0, 'stale': []}
     active_cid = (os.environ.get('ANTIGRAVITY_CONVERSATION_ID') or '').strip().lower()
     cutoff = time.time() - gemini_days * 86400.0 if gemini_days is not None else None
-    total_bytes, stale = 0, []
+    total_bytes = 0
+    by_cid = {}
     for sub in ('conversations', 'brain'):
         d = os.path.join(root, sub)
         if not os.path.isdir(d):
@@ -957,22 +1001,38 @@ def _scan_gemini_sessions(gemini_dir, gemini_days):
             total_bytes += b
             if cutoff is None:
                 continue
-            stem = entry.name.split('.', 1)[0].lower()
-            if active_cid and stem == active_cid:
+            cid = entry.name.split('.', 1)[0].lower()
+            bucket = by_cid.setdefault(cid, {'items': [], 'mtime': 0.0, 'locked': False})
+            mtime = _newest_recursive(entry.path) if is_dir else st.st_mtime
+            if mtime > bucket['mtime']:
+                bucket['mtime'] = mtime
+            if not is_dir and running(entry.path):
+                bucket['locked'] = True
+            bucket['items'].append({'path': entry.path, 'bytes': b})
+    stale = []
+    if cutoff is not None:
+        for cid, bucket in sorted(by_cid.items()):
+            if active_cid and cid == active_cid:
                 continue
-            mtime = newest(entry.path) if is_dir else st.st_mtime
-            if mtime < cutoff:
-                if not is_dir and running(entry.path):
-                    continue
-                stale.append({'path': entry.path, 'bytes': b})
+            if bucket['locked'] or bucket['mtime'] >= cutoff:
+                continue
+            stale.extend(bucket['items'])
     return {'exists': True, 'root': root, 'total_bytes': total_bytes, 'stale': stale}
+
+
+def _has_memory_dir(folder):
+    for dirpath, dirnames, _ in os.walk(folder, topdown=True):
+        dirnames[:] = [d for d in dirnames if not linked(os.path.join(dirpath, d))]
+        if any(d.lower() == 'memory' for d in dirnames):
+            return True
+    return False
 
 
 def sessions(days, apply, as_json, projects_dir=None, workspaces_root=None, gemini_days=None, gemini_dir=None):
     """List (and with --apply delete) dead Orca project dirs, old Claude transcripts, and optionally old Antigravity sessions.
 
-    Strictly preserves `memory/` directories, any live Claude session in `~/.claude/sessions/`, and the active
-    Antigravity conversation (`ANTIGRAVITY_CONVERSATION_ID`) plus any locked `.db` files.
+    Strictly preserves `memory/` directories, any live Claude session in `~/.claude/sessions/` or Orca profiles,
+    live Orca workspace subdirectories, and active/recent/locked Antigravity sessions.
     """
     claude_home = os.path.dirname(projects_dir) if projects_dir else HOME
     proj_root = projects_dir or os.path.join(claude_home, 'projects')
@@ -984,12 +1044,14 @@ def sessions(days, apply, as_json, projects_dir=None, workspaces_root=None, gemi
         live_sids, live_cwds = _live_sessions(claude_home)
         live_keys = {_claude_proj_key(p) for p in live_cwds}
         existing_orca = _existing_orca_keys(ws_root)
+        active_prefixes = existing_orca | live_keys
         cutoff = time.time() - days * 86400.0
         for proj in sorted(entries(proj_root), key=lambda e: e.name):
             if not proj.is_dir(follow_symlinks=False) or linked(proj.path):
                 continue
             proj_key = proj.name.lower() if os.name == 'nt' else proj.name
-            if '-orca-workspaces-' in proj_key and proj_key not in existing_orca and proj_key not in live_keys:
+            alive_ws = any(proj_key == k or proj_key.startswith(k + '-') for k in active_prefixes)
+            if '-orca-workspaces-' in proj_key and not alive_ws and not _has_memory_dir(proj.path):
                 dead_dirs.append({'path': proj.path, 'bytes': size_of(proj.path)})
                 continue
             for dirpath, dirnames, filenames in os.walk(proj.path, topdown=True):
