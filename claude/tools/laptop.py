@@ -320,7 +320,11 @@ try {{
 """
 
 
-def build_remote_starter_ps(name: str, work: str, locks: str, pool: str, user: str, hours: int, script_path: str) -> str:
+def build_remote_starter_ps(name: str, work: str, locks: str, pool: str, user: str, hours: int, script_path: str,
+                            gpu: bool = True, max_cpu_jobs: int = 2) -> str:
+    # A CPU-only job may share the laptop with other CPU-only offloads (up to max_cpu_jobs); its
+    # builds still queue on the laptop's own build_lock lanes. GPU runs and gates stay exclusive.
+    exclusive = '$true' if gpu else '$false'
     return f"""
 $ErrorActionPreference = 'Stop'
 $locks = {ps_quote(locks)}
@@ -336,16 +340,23 @@ foreach ($n in 'BUILD-LOCK', 'LAPTOP-LOCK', 'PRIORITY') {{
   if ($n -in 'PRIORITY','LAPTOP-LOCK' -and $t -match 'pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {{ continue }}
   $busy += "$n`: $($t.Trim())"
 }}
-foreach ($d in (Join-Path $locks 'lanes'), $pool) {{
-  if (Test-Path -LiteralPath $d) {{
-    foreach ($f in Get-ChildItem -LiteralPath $d -Filter '*.lock') {{
-      if (Test-Held $f.FullName) {{ $busy += "lane $($f.Name)" }}
+$exclusive = {exclusive}
+if ($exclusive) {{
+  foreach ($d in (Join-Path $locks 'lanes'), $pool) {{
+    if (Test-Path -LiteralPath $d) {{
+      foreach ($f in Get-ChildItem -LiteralPath $d -Filter '*.lock') {{
+        if (Test-Held $f.FullName) {{ $busy += "lane $($f.Name)" }}
+      }}
     }}
   }}
 }}
-foreach ($t in Get-ScheduledTask -TaskName 'rl-gate-*','rl-remote-check-*','rl-offload-*' -ErrorAction SilentlyContinue) {{
+foreach ($t in Get-ScheduledTask -TaskName 'rl-gate-*','rl-remote-check-*' -ErrorAction SilentlyContinue) {{
   if ($t.State -eq 'Running') {{ $busy += "task $($t.TaskName) is running" }}
 }}
+$offloads = @(Get-ScheduledTask -TaskName 'rl-offload-*' -ErrorAction SilentlyContinue | Where-Object {{ $_.State -eq 'Running' }})
+if ($offloads | Where-Object {{ $_.TaskName -eq {ps_quote('rl-offload-' + name)} }}) {{ $busy += "task rl-offload-{name} is already running" }}
+if ($exclusive -and $offloads.Count) {{ $busy += ($offloads | ForEach-Object {{ "task $($_.TaskName) is running" }}) }}
+if (-not $exclusive -and $offloads.Count -ge {max_cpu_jobs}) {{ $busy += "$($offloads.Count) CPU offloads running (max {max_cpu_jobs})" }}
 if ($busy.Count) {{ 'BUSY'; $busy; exit 4 }}
 $console = (Get-CimInstance Win32_ComputerSystem).UserName
 if (-not $console -or ($console -split '\\\\')[-1] -ine {ps_quote(user)}) {{
@@ -443,7 +454,8 @@ def cmd_run(args, cfg):
             pass
 
     hours = max(1, (args.timeout + 59) // 60)
-    starter_ps = build_remote_starter_ps(slug, args.work, args.locks, args.pool, args.user, hours, remote_script)
+    starter_ps = build_remote_starter_ps(slug, args.work, args.locks, args.pool, args.user, hours, remote_script,
+                                         gpu=args.gpu)
     deadline = time.monotonic() + args.timeout * 60
     while True:
         code, out, err = ssh_run(ssh_cmd, target, starter_ps, timeout=45)
