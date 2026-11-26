@@ -921,7 +921,7 @@ class CargoPoolHookTests(unittest.TestCase):
         for repo in (self.pool, self.other):
             subprocess.run(['git', 'init', '-q', str(repo)], check=True)
         (self.pool / 'tools').mkdir()
-        (self.pool / 'tools' / 'build_lock.py').write_text('', encoding='utf-8')
+        (self.pool / 'tools' / 'dev_cargo.py').write_text('', encoding='utf-8')
 
     def hook(self, command, cwd=None):
         done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'cargo_pool.py')], capture_output=True, text=True,
@@ -950,6 +950,26 @@ class CargoPoolHookTests(unittest.TestCase):
             self.assertIsNone(self.hook(command), command)
         self.assertIsNone(self.hook('cargo test -p x', self.other))
         self.assertIsNone(self.hook(f'cd "{self.other}" && cargo test'))
+
+    def test_a_checkout_without_dev_cargo_passes(self):
+        (self.pool / 'tools' / 'dev_cargo.py').rename(self.pool / 'tools' / 'build_lock.py')
+        self.assertIsNone(self.hook('cargo test -p x'))
+
+    def test_option_values_and_assignments_do_not_hide_a_build(self):
+        for command in ('cargo --manifest-path rust/Cargo.toml test', 'cargo --manifest-path "a b/Cargo.toml" test',
+                        'cargo -j 4 build', '$out = cargo build 2>&1', 'out = cargo build', '$script:log += cargo test'):
+            self.assertIsNotNone(self.hook(command), command)
+        manifest = (self.pool / 'Cargo.toml').as_posix()
+        self.assertIsNotNone(self.hook(f'cargo --manifest-path "{manifest}" test', self.other))
+
+    def test_a_pooled_part_does_not_excuse_the_rest_of_the_line(self):
+        for command in ('python tools/dev.py check; cargo build', 'tools\\dev.ps1 check && cargo test', 'rust\\build.ps1 || cargo build',
+                        'python tools/dev.py check | cargo run', 'python tools/dev.py check\ncargo build',
+                        'CARGO_TARGET_DIR=/tmp/t cargo build; cargo test', 'cargo build --target-dir /tmp/t && cargo test'):
+            self.assertIsNotNone(self.hook(command), command)
+        for command in ('export CARGO_TARGET_DIR=/tmp/t && cargo build', 'CARGO_TARGET_DIR=/tmp/t; cargo build',
+                        '. "C:\\a b\\rl-env.ps1"; cargo test'):
+            self.assertIsNone(self.hook(command), command)
 
     def test_its_own_errors_let_the_command_run(self):
         done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'cargo_pool.py')], input='not json', capture_output=True, text=True)

@@ -73,6 +73,76 @@ class CachesTests(unittest.TestCase):
         self.age(mixed, 10)
         self.assertEqual(self.listed(), [])
 
+    def skipped(self, *args):
+        return {Path(row['path']).relative_to(self.root).as_posix(): row['why'] for row in json.loads(self.tool('--json', *args))['skipped']}
+
+    def module(self):
+        spec = importlib.util.spec_from_file_location('task_caches', TOOL)
+        task = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(task)
+        return task
+
+    def test_a_tagged_folder_with_other_content_or_a_checkout_is_skipped(self):
+        logs, tree = self.target(self.artifacts / 'a' / 'target'), self.target(self.artifacts / 'b' / 'target')
+        (logs / 'build.log').write_text('evidence', encoding='utf-8')
+        (tree / 'debug' / 'build' / 'dep' / '.git').mkdir(parents=True)
+        whole = self.target(self.artifacts / 'c' / 'target')
+        self.target(whole / 'x86_64-pc-windows-msvc')
+        self.target(whole / 'service')
+        for name in ('doc', 'tmp', 'flycheck0', 'nextest'):
+            (whole / name).mkdir()
+        for path in (logs, tree, whole):
+            self.age(path, 10)
+        self.assertEqual(self.listed(), ['artifacts/c/target'])
+        self.assertEqual(self.skipped(), {'artifacts/a/target': 'mixed', 'artifacts/b/target': 'holds a checkout'})
+        self.tool('--apply')
+        self.assertTrue((logs / 'build.log').exists() and (tree / 'debug' / 'app.exe').exists())
+        self.assertFalse(whole.exists())
+
+    def test_untagged_doc_package_and_tmp_must_look_like_cargos(self):
+        target = self.target(self.artifacts / 'a', tagged=False)
+        for name in ('doc/static.files', 'doc/app', 'package/app-1.2.3', 'tmp'):
+            (target / name).mkdir(parents=True)
+        (target / 'doc' / 'app' / 'index.html').write_text('', encoding='utf-8')
+        (target / 'package' / 'app-1.2.3.crate').write_text('', encoding='utf-8')
+        self.age(target, 10)
+        self.assertEqual(self.listed(), ['artifacts/a'])
+        for name in ('doc/notes.md', 'package/setup.exe', 'tmp/run.log'):
+            (target / name).write_text('evidence', encoding='utf-8')
+            self.age(target, 10)
+            self.assertEqual(self.listed(), [], name)
+            (target / name).unlink()
+
+    def test_a_target_in_use_is_not_deleted(self):
+        task = self.module()
+        target = self.target(self.artifacts / 'a' / 'target')
+        (target / 'debug' / '.cargo-lock').write_text('', encoding='utf-8')
+        self.age(target, 10)
+        held = task.lock(target / 'debug' / '.cargo-lock')
+        try:
+            self.assertIn('is locked', self.tool('--apply'))
+        finally:
+            held.close()
+        self.assertTrue((target / 'debug' / 'app.exe').exists())
+        with patch.dict(os.environ, self.env):
+            row = task.targets(task.settings(), 3)[0][0]
+        with patch.object(task, 'running', lambda path: True):
+            self.assertIn('running', task.delete(row, 3))
+        os.utime(target / 'debug')
+        self.assertIn('no longer idle', task.delete(row, 3))
+        self.assertTrue((target / 'debug' / 'app.exe').exists())
+        self.age(target, 10)
+        self.tool('--apply')
+        self.assertFalse(target.exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows refuses to open a running program')
+    def test_a_running_program_is_recognised(self):
+        task = self.module()
+        self.assertTrue(task.running(sys.executable))
+        idle = self.root / 'idle.exe'
+        idle.write_bytes(b'x')
+        self.assertFalse(task.running(str(idle)))
+
     def test_a_target_beside_a_checkout_in_use_stays(self):
         target = self.target(self.artifacts / 'work' / 'target')
         tree = self.artifacts / 'work' / 'src'
@@ -95,13 +165,11 @@ class CachesTests(unittest.TestCase):
 
     def test_a_locked_file_does_not_stop_the_run_and_the_target_stays_findable(self):
         first, second = self.target(self.artifacts / 'a' / 'target'), self.target(self.artifacts / 'b' / 'target')
-        spec = importlib.util.spec_from_file_location('task_caches', TOOL)
-        task = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(task)
+        task = self.module()
         remove = task.remove
 
         def locked(path):
-            if Path(path) == first / 'debug':
+            if Path(path) == first / 'debug' / 'app.exe':
                 raise PermissionError('in use')
             remove(path)
         out = io.StringIO()
@@ -109,7 +177,8 @@ class CachesTests(unittest.TestCase):
             task.caches(task.settings(), 3, True, False)
         self.assertIn('1 failed', out.getvalue())
         self.assertFalse(second.exists())
-        self.assertTrue((first / 'CACHEDIR.TAG').exists())
+        self.assertTrue((first / 'CACHEDIR.TAG').exists() and (first / 'debug' / '.fingerprint').is_dir())
+        self.assertIn('artifacts/a/target', self.listed('--days', '0'))
 
 
 if __name__ == '__main__':

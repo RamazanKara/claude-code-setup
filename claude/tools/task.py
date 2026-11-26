@@ -23,6 +23,8 @@
 `caches` looks below the artifact folder and the roots for Cargo target folders, whose content Cargo
 can build again. It leaves out what is kept, links, the pools of build locks (Rubylight prunes those
 with `tools/build_lock.py --prune`) and a target beside or in a checkout that git worked in lately.
+It skips, and names, a target that holds anything Cargo does not write ("mixed") or a git checkout,
+and with --apply one whose build lock is held, whose program runs or that was built in meanwhile.
 
 Apart from `caches --apply`, only `close` deletes, and only what the task itself can have made. A folder elsewhere must lie in
 the temp folder or a root and hold none of those, be no link, hold no checkout and nothing kept, and
@@ -41,7 +43,13 @@ SLACK = 2  # seconds a clock or a file system may be off
 IDLE_DAYS = 3
 DEPTH = 4  # how far below the artifact folder or a root `caches` looks for a target folder
 MARKERS = ('.rustc_info.json', 'CACHEDIR.TAG')
-CARGO_FILES = (*MARKERS, '.cargo-lock', '.future-incompat-report.json', '.rubylight-checkout')  # the last: Rubylight's dev.py
+LOCKS = ('.cargo-lock', '.cargo-build-lock', '.cargo-artifact-lock')
+CARGO_FILES = (*MARKERS, *LOCKS, '.rustc_info.json.lock', '.package-cache', '.future-incompat-report.json',
+               '.rubylight-checkout')  # the last: Rubylight's dev.py
+# What Cargo and its subcommands put beside the profiles and target triples.
+CARGO_DIRS = re.compile(r'debug|release|doc|package|tmp|cargo-timings|nextest|llvm-cov-target|miri|rust-analyzer|flycheck\d*')
+RUSTDOC_FILES = re.compile(r'\.lock|\.rustdoc_fingerprint\.json|(?:crates|src-files|source-files|search-index|search-desc)\.js|(?:help|settings|index)\.html')
+RUSTDOC_DIRS = ('static.files', 'src', 'search.desc', 'search.index', 'trait.impl', 'type.impl', 'implementors')
 SHELLS = {'powershell': ['powershell', '-NoProfile', '-NonInteractive', '-Command'], 'pwsh': ['pwsh', '-NoProfile', '-NonInteractive', '-Command'],
           'bash': ['bash', '-c'], 'sh': ['sh', '-c'], 'cmd': ['cmd', '/c']}
 
@@ -618,19 +626,58 @@ def profile(folder):
     return any(os.path.isdir(os.path.join(here, '.fingerprint')) for here in (folder, *folders(folder)))
 
 
-def cargo_target(folder):
-    """A folder Cargo made says so in its CACHEDIR.TAG. One that was there before Cargo built into it has none, and
-    counts only when it holds nothing but Cargo's: a task folder used as target dir also holds logs and evidence."""
+def tagged(folder):
     try:
         with open(os.path.join(folder, 'CACHEDIR.TAG'), encoding='utf-8', errors='replace') as f:
-            if 'created by cargo' in f.read(1000) and os.path.isfile(os.path.join(folder, '.rustc_info.json')):
-                return True
+            return 'created by cargo' in f.read(1000) and os.path.isfile(os.path.join(folder, '.rustc_info.json'))
     except OSError:
-        pass
-    if not any(os.path.isdir(os.path.join(folder, name, '.fingerprint')) for name in ('debug', 'release')):
         return False
-    return all(entry.name in CARGO_FILES if not entry.is_dir(follow_symlinks=False) else
-               entry.name in ('doc', 'package', 'tmp') or profile(entry.path) for entry in entries(folder))
+
+
+def rustdoc(folder):
+    """Only what rustdoc writes: its own files and folders, and one folder of pages for each crate."""
+    for entry in entries(folder):
+        if not entry.is_dir(follow_symlinks=False):
+            if not RUSTDOC_FILES.fullmatch(entry.name):
+                return False
+        elif entry.name not in RUSTDOC_DIRS and not all(item.is_dir(follow_symlinks=False) or item.name.endswith(('.html', '.js'))
+                                                        for item in entries(entry.path)):
+            return False
+    return True
+
+
+def recognised(entry):
+    """doc, package or tmp of a folder without a tag, judged by what it holds."""
+    if entry.name == 'doc':
+        return rustdoc(entry.path)
+    if entry.name == 'tmp':
+        return not entries(entry.path)
+    return all(re.fullmatch(r'tmp-crate|tmp-registry|.+-\d+\.\d+\.\d+.*', item.name) if item.is_dir(follow_symlinks=False) else
+               item.name.endswith('.crate') or item.name in LOCKS for item in entries(entry.path))
+
+
+def only_cargo(folder, marked):
+    """Nothing in `folder` but what Cargo writes. `marked`: its tag says so, so doc, package and tmp are not looked into."""
+    for entry in entries(folder):
+        if not entry.is_dir(follow_symlinks=False):
+            if entry.name not in CARGO_FILES:
+                return False
+        elif entry.name in ('doc', 'package', 'tmp'):
+            if not (marked or recognised(entry)):
+                return False
+        elif not (CARGO_DIRS.fullmatch(entry.name) or os.path.isdir(os.path.join(entry.path, '.fingerprint'))
+                  or profile(entry.path) and only_cargo(entry.path, marked or tagged(entry.path))):
+            return False
+    return True
+
+
+def cargo_target(folder):
+    """None for a folder Cargo did not build into, else whether it holds nothing but Cargo's. A folder Cargo made says
+    so in its CACHEDIR.TAG, one that was there before has none; either may be a task folder with logs and evidence."""
+    marked = tagged(folder)
+    if not marked and not any(os.path.isdir(os.path.join(folder, name, '.fingerprint')) for name in ('debug', 'release')):
+        return None
+    return only_cargo(folder, marked)
 
 
 def pooled(path):
@@ -664,9 +711,19 @@ def size_of(folder):
     return total
 
 
+def idle_days(path, trees, days):
+    """How long a target has been idle; None when it or a checkout beside it was used within `days`."""
+    now = time.time()
+    idle = (now - last_built(path)) / 86400
+    if idle < days or any((now - last_used(tree)) / 86400 < days for tree in set(trees) - {path}):
+        return None
+    return idle
+
+
 def targets(cfg, days):
-    """The Cargo target folders that may go: below the artifact folder and the roots, and idle `days` days."""
-    now, found, seen = time.time(), [], set()
+    """The Cargo target folders that may go: below the artifact folder and the roots, and idle `days` days. Also
+    those left alone for what they hold."""
+    found, skipped, seen = [], [], set()
     todo = [(root, 0, ()) for root in (cfg['artifacts'], *cfg['roots'])]
     while todo:
         folder, depth, trees = todo.pop()
@@ -676,49 +733,148 @@ def targets(cfg, days):
             if real(path) in seen or pooled(path):
                 continue
             seen.add(real(path))
-            if not cargo_target(path):
+            pure = cargo_target(path)
+            if not pure:
+                if pure is False and not kept(path, cfg):
+                    skipped.append({'path': path, 'why': 'mixed'})
                 if depth + 1 < DEPTH:
                     todo.append((path, depth + 1, trees))
                 continue
-            if kept(path, cfg) or os.path.exists(os.path.join(path, '.git')) or os.path.exists(os.path.join(path, 'task.json')):
+            if kept(path, cfg) or os.path.exists(os.path.join(path, 'task.json')):
                 continue
-            idle = (now - last_built(path)) / 86400
-            if idle < days or any((now - last_used(tree)) / 86400 < days for tree in set(trees) - {path}):
+            idle = idle_days(path, trees, days)
+            if idle is None:
                 continue
-            found.append({'path': path, 'bytes': size_of(path), 'idle_days': round(idle, 1)})
-    return sorted(found, key=lambda row: -row['bytes'])
+            if checkout_in(path):
+                skipped.append({'path': path, 'why': 'holds a checkout'})
+                continue
+            found.append({'path': path, 'bytes': size_of(path), 'idle_days': round(idle, 1), 'trees': trees})
+    return sorted(found, key=lambda row: -row['bytes']), sorted(skipped, key=lambda row: row['path'])
 
 
-def clear(target):
-    """Delete a target folder. What marks it as one goes last, so that a later run finds what a locked file left."""
-    errors = []
-    for entry in sorted(entries(target), key=lambda entry: entry.name in MARKERS):
-        if errors and entry.name in MARKERS:
-            break
+def profiles(target, depth=3):
+    """The folders in a target that Cargo locks or builds into: profiles, also below triples and nested targets."""
+    for path in folders(target):
+        if any(os.path.lexists(os.path.join(path, name)) for name in (*LOCKS, '.fingerprint')):
+            yield path
+        elif depth > 1:
+            yield from profiles(path, depth - 1)
+
+
+def lock(path):
+    """Take Cargo's lock on this file without waiting; the open file that holds it, or OSError when it is held."""
+    handle = open(path, 'r+b')
+    try:
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # one byte of the whole file that Cargo locks
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise
+    return handle
+
+
+def running(program):
+    """A program that cannot be opened for writing alone: it runs, or something holds it."""
+    if os.name != 'nt':
         try:
-            remove(entry.path)
+            with open(program, 'r+b'):
+                return False
+        except OSError:
+            return True
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                   wintypes.DWORD, wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateFileW('\\\\?\\' + os.path.abspath(program), 0x40000000, 0, None, 3, 0, None)  # write, share nothing
+    if handle == wintypes.HANDLE(-1).value:
+        return True
+    kernel.CloseHandle(handle)
+    return False
+
+
+def prune(folder, errors):
+    """Delete what `folder` holds except what a later run needs to know it as a target: fingerprints, tags and locks."""
+    for entry in entries(folder):
+        if entry.name == '.fingerprint' or entry.name in (*MARKERS, *LOCKS):
+            continue
+        try:
+            if entry.is_dir(follow_symlinks=False) and not linked(entry.path):
+                prune(entry.path, errors)
+                if not entries(entry.path):
+                    remove(entry.path)
+            else:
+                remove(entry.path)
         except OSError as error:
             errors.append(error)
+
+
+def clear(target, held=()):
+    """Delete a target folder. What marks it as one goes last, so that a later run finds what a locked file left."""
+    errors = []
+    prune(target, errors)
     if errors:
         raise errors[0]
+    for handle in held:  # Windows deletes no open file
+        handle.close()
+    for entry in sorted(entries(target), key=lambda entry: entry.name in MARKERS):
+        remove(entry.path)
     remove(target)
 
 
+def delete(row, days):
+    """Delete a listed target and return None, or why it is in use after all."""
+    held = []
+    try:
+        built = list(profiles(row['path']))
+        for path in built:
+            for name in LOCKS:
+                file = os.path.join(path, name)
+                if os.path.isfile(file):
+                    try:
+                        held.append(lock(file))
+                    except OSError:
+                        return f'in use: {file} is locked'
+        if idle_days(row['path'], row['trees'], days) is None:
+            return 'in use: no longer idle'
+        for path in built:
+            for folder in (path, os.path.join(path, 'deps')):
+                for entry in entries(folder):
+                    if entry.name.lower().endswith('.exe') and entry.is_file(follow_symlinks=False) and running(entry.path):
+                        return f'in use: {entry.path} is running or locked'
+        clear(row['path'], held)
+    finally:
+        for handle in held:
+            handle.close()
+
+
 def caches(cfg, days, apply, as_json):
-    found, freed, failed = targets(cfg, days), 0, []
+    (found, skipped), freed, failed = targets(cfg, days), 0, []
     total = sum(row['bytes'] for row in found)
     for row in found if apply else []:
         try:
-            clear(row['path'])
+            why = delete(row, days)
+            if why:
+                skipped.append({'path': row['path'], 'why': why})
         except OSError as error:
             failed.append({'path': row['path'], 'error': str(error)})
         freed += row['bytes'] - (size_of(row['path']) if os.path.lexists(row['path']) else 0)
+    for row in found:
+        del row['trees']
     if as_json:
         return print(json.dumps({'applied': apply, 'days': days, 'targets': found, 'total_bytes': total, 'freed_bytes': freed,
-                                 'failed': failed}, indent=1))
+                                 'skipped': skipped, 'failed': failed}, indent=1))
     for row in found:
         print(f'{row["bytes"] / 1e9:8.2f} GB  idle {row["idle_days"]:6.1f} days  {row["path"]}')
     print(f'{len(found)} Cargo target folders idle {days:g} days or more, {total / 1e9:.2f} GB')
+    for row in skipped:
+        print(f'skipped {row["path"]}: {row["why"]}')
     if not apply:
         tool = os.path.abspath(__file__).replace('\\', '/')
         return print(f'dry run, nothing deleted; to delete them: python "{tool}" caches --days {days:g} --apply')
