@@ -462,6 +462,9 @@ def cmd_run(args, cfg):
         if code == 0:
             print(f'laptop.py: {out} (repo={repo_path}, branch={branch}, gpu={args.gpu})', flush=True)
             break
+        # Windows PowerShell over ssh may not pass `exit 4` through, so the BUSY banner counts too.
+        if code != 4 and (out or '').lstrip().startswith('BUSY'):
+            code = 4
         if code != 4 or not args.wait or time.monotonic() > deadline:
             print(out or err or f'start failed (exit {code})', file=sys.stderr)
             return code if code in (4, 5) else 1
