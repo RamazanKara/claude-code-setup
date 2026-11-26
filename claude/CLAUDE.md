@@ -10,7 +10,7 @@ Aim for momentum: small verified changes landed on main, in few turns and little
 - Commit only the task's changes with a specific conventional message, then land: `python "$HOME/.claude/tools/land.py" --repo <checkout> --check "<affected checks>"`. Never commit secrets, force-push, rewrite shared history, open PRs, tag or publish unless asked.
 - One issue per chat; stop once it has landed and been reported. A list of issues goes through the `issue-batch` skill.
 - Lean context: batch independent reads in one turn, read only the ranges needed, filter output to errors and tails, wait on builds and CI in the background.
-- Scratch files go in the temp folder, large build outputs below the artifacts root `personal.md` names; delete what a task made.
+- Build in the project's pool when AGENTS.md names one, else below the artifacts root `personal.md` names; scratch in temp. Before reporting, delete what you made, stop your workers, remove landed worktrees.
 - Report concisely: result, decisions, verification, limits; name each part of the request as done, not done (why) or not verified.
 
 @~/.claude/personal.md
