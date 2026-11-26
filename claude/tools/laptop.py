@@ -570,7 +570,7 @@ if ($Apply) {{
   $lockFile = Join-Path {ps_quote(DEFAULT_LOCKS)} 'LAPTOP-LOCK'
   if (-not ($running | Where-Object {{ $_ -like 'rl-offload-*' }}) -and (Test-Path -LiteralPath $lockFile)) {{
     $lt = Get-Content -LiteralPath $lockFile -Raw -ErrorAction SilentlyContinue
-    if ($lt -match 'laptop\.py offload' -and $lt -match 'pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {{
+    if ($lt -match 'laptop\\.py offload' -and $lt -match 'pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {{
       Remove-Item -LiteralPath $lockFile -ErrorAction SilentlyContinue
     }}
   }}
