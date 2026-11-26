@@ -64,7 +64,7 @@ Edit templates here before reinstalling. Keep machine-specific paths in `~/.clau
 - `claude/CLAUDE.md`: momentum, verification, Git landing, one issue per chat and the issue batch, helper routing, lean context, agents and review; a test keeps it under 3 KB.
 - `claude/agents/reviewer.md`: the review instructions, used by `oc.py review` and by the Opus agent for a second review on request.
 - `claude/hooks/read_streak.py`: the nudge after read-only turns of one call each.
-- `claude/hooks/cargo_pool.py`: in a checkout with `tools/build_lock.py` (Rubylight), denies a bare building `cargo` command, which would leave a private `target/` and executables at new paths, and says to run it as `python tools/dev.py cargo -- <args>`. A `# POOL_SKIP=<reason>` comment lets it through.
+- `claude/hooks/cargo_pool.py`: in a Rubylight checkout that has `tools/dev_cargo.py`, denies a bare building `cargo` command, which would leave a private `target/` and executables at new paths, and says to run it as `python tools/dev.py cargo -- <args>`. A `# POOL_SKIP=<reason>` comment lets it through.
 - `claude/hooks/review_gate.py`: holds back an unreviewed push to main and notes when the reviewer ran.
 - `claude/hooks/fresh_checkout.py`: fast-forwards a clean checkout on main at session start, or says it is behind.
 - `opencode/agents/`: DeepSeek V4.1 Flash subagents for GLM 5.3 as orchestrator: scout (low effort, may not edit), mechanic (high), runner (low), coder (max) and reviewer (max, may not edit).

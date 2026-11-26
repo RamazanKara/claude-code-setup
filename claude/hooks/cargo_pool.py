@@ -26,7 +26,7 @@ CARGO = re.compile(
 SCRIPTS = r'tools[\\/]+dev\.(?:py|ps1)|rust[\\/]+build\.ps1|rl-env\.ps1'
 THROUGH = re.compile(SCRIPTS + r'|Enter-RlSlot|CARGO_TARGET_DIR\s*=|--target-dir\b', re.I)
 # What also holds for the later parts of a command line.
-LASTING = re.compile(r'rl-env\.ps1|Enter-RlSlot|\$env:CARGO_TARGET_DIR\s*=|\b(?:export|set)\s+CARGO_TARGET_DIR=|^\s*CARGO_TARGET_DIR=\S*\s*$', re.I)
+LASTING = re.compile(r'rl-env\.ps1|Enter-RlSlot|\$env:CARGO_TARGET_DIR\s*=|\b(?:export|set)\s+(?:\S+\s+)*CARGO_TARGET_DIR=|^\s*CARGO_TARGET_DIR=\S*\s*$', re.I)
 PARTS = re.compile(r'&&|\|\||(?<!>)\||[;\n]')
 SKIP = re.compile(r'POOL_SKIP\s*[=:]\s*[\'"]?([^\'";\n]+)', re.I)
 # Text that is no command of this shell: here-documents, here-strings, comments and quoted strings.

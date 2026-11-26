@@ -946,7 +946,7 @@ class CargoPoolHookTests(unittest.TestCase):
                         '. C:\\src\\rl-env.ps1; Enter-RlSlot $repo; cargo test', 'cargo fmt --all', 'cargo metadata', 'cargo tree',
                         'cargo --version', 'cargo locate-project', 'cargo pkgid', 'cargo search build', 'cargo test  # POOL_SKIP=pool is full',
                         'git commit -m "fix: x\n\ncargo test passes"', "cat <<'EOF' > a.md\ncargo test\nEOF", 'ssh nuc "cd x && cargo build"',
-                        'rg "cargo build" docs'):
+                        'rg "cargo build" docs', 'export RUST_LOG=1 CARGO_TARGET_DIR=/t && cargo build'):
             self.assertIsNone(self.hook(command), command)
         self.assertIsNone(self.hook('cargo test -p x', self.other))
         self.assertIsNone(self.hook(f'cd "{self.other}" && cargo test'))

@@ -107,7 +107,11 @@ class CachesTests(unittest.TestCase):
         (target / 'package' / 'app-1.2.3.crate').write_text('', encoding='utf-8')
         self.age(target, 10)
         self.assertEqual(self.listed(), ['artifacts/a'])
-        for name in ('doc/notes.md', 'package/setup.exe', 'tmp/run.log'):
+        (target / 'doc' / 'app' / 'sub').mkdir()
+        (target / 'doc' / 'app' / 'sub' / 'page.html').write_text('', encoding='utf-8')
+        self.age(target, 10)
+        self.assertEqual(self.listed(), ['artifacts/a'])
+        for name in ('doc/notes.md', 'package/setup.exe', 'tmp/run.log', 'doc/app/sub/trace.log'):
             (target / name).write_text('evidence', encoding='utf-8')
             self.age(target, 10)
             self.assertEqual(self.listed(), [], name)
@@ -128,6 +132,11 @@ class CachesTests(unittest.TestCase):
             row = task.targets(task.settings(), 3)[0][0]
         with patch.object(task, 'running', lambda path: True):
             self.assertIn('running', task.delete(row, 3))
+        (target / 'debug' / 'examples').mkdir()
+        (target / 'debug' / 'examples' / 'probe.exe').write_text('', encoding='utf-8')
+        self.age(target, 10)
+        with patch.object(task, 'running', lambda path: path.endswith('probe.exe')):
+            self.assertIn('probe.exe', task.delete(row, 3))
         os.utime(target / 'debug')
         self.assertIn('no longer idle', task.delete(row, 3))
         self.assertTrue((target / 'debug' / 'app.exe').exists())

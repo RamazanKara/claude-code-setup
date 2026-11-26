@@ -634,14 +634,19 @@ def tagged(folder):
         return False
 
 
+def pages(folder):
+    """A folder of rustdoc pages: only .html and .js files, at any depth."""
+    return all(pages(item.path) if item.is_dir(follow_symlinks=False) else item.name.endswith(('.html', '.js'))
+               for item in entries(folder))
+
+
 def rustdoc(folder):
     """Only what rustdoc writes: its own files and folders, and one folder of pages for each crate."""
     for entry in entries(folder):
         if not entry.is_dir(follow_symlinks=False):
             if not RUSTDOC_FILES.fullmatch(entry.name):
                 return False
-        elif entry.name not in RUSTDOC_DIRS and not all(item.is_dir(follow_symlinks=False) or item.name.endswith(('.html', '.js'))
-                                                        for item in entries(entry.path)):
+        elif entry.name not in RUSTDOC_DIRS and not pages(entry.path):
             return False
     return True
 
@@ -844,7 +849,7 @@ def delete(row, days):
         if idle_days(row['path'], row['trees'], days) is None:
             return 'in use: no longer idle'
         for path in built:
-            for folder in (path, os.path.join(path, 'deps')):
+            for folder in (path, os.path.join(path, 'deps'), os.path.join(path, 'examples')):
                 for entry in entries(folder):
                     if entry.name.lower().endswith('.exe') and entry.is_file(follow_symlinks=False) and running(entry.path):
                         return f'in use: {entry.path} is running or locked'
