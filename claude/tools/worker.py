@@ -28,7 +28,7 @@ AGY_MODELS = {
     'review': 'gemini-4-carbon-high',
 }
 AGY_EFFORT = {'read': 'low', 'write': 'high', 'code': 'xhigh', 'review': 'high'}
-READONLY_DISALLOWED = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']
+READONLY_DISALLOWED = ['Write', 'Edit', 'NotebookEdit']
 AGY_INLINE_LIMIT = 20_000  # bytes; larger prompts go through a temp file cleaned in finally
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -108,6 +108,28 @@ def build_command(harness, args, prompt, prompt_file=None):
     return cmd, None, 'agy'
 
 
+def claude_env():
+    """Return child env for `claude -p`, resolving Orca's active Claude profile when CLAUDE_CONFIG_DIR is unset."""
+    env = dict(os.environ)
+    if env.get('CLAUDE_CONFIG_DIR'):
+        return env
+    orca = env.get('ORCA_USER_DATA_PATH') or (os.path.join(env['APPDATA'], 'orca') if env.get('APPDATA') else '')
+    if not orca:
+        return env
+    sel_file = os.path.join(orca, 'claude-profiles', 'selected-host')
+    try:
+        with open(sel_file, encoding='utf-8') as f:
+            raw = f.read().strip()
+    except OSError:
+        return env
+    if not raw:
+        return env
+    cfg = raw if os.path.isabs(raw) else os.path.join(orca, 'claude-profiles', raw, 'home')
+    if os.path.isdir(cfg):
+        env['CLAUDE_CONFIG_DIR'] = cfg
+    return env
+
+
 def execute(harness, args, prompt):
     """Run one worker invocation and return (report_text, error_reason, exit_code)."""
     prompt_file = None
@@ -123,6 +145,7 @@ def execute(harness, args, prompt):
         cmd, stdin_text, exe_name = build_command(harness, args, prompt, prompt_file)
         if not cmd:
             return '', f'{exe_name} is not on PATH', 1
+        child_env = claude_env() if harness == 'claude' else None
         run = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
@@ -132,6 +155,7 @@ def execute(harness, args, prompt):
             encoding='utf-8',
             errors='replace',
             cwd=args.dir,
+            env=child_env,
             start_new_session=os.name != 'nt',
         )
         try:

@@ -3,7 +3,7 @@ name: coder
 description: Sonnet (high effort). Scoped implementation worker for multi-file fixes, scaffolding, and regression tests. Uses the project's shared build pool and runs only the narrowest affected check plus formatter. Never pushes to main.
 model: sonnet
 effort: high
-tools: Read, Edit, Write, MultiEdit, Grep, Glob, Bash, WebSearch, WebFetch
+tools: Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch
 ---
 Implement the scoped change described in your brief cleanly and stop when its narrow verification passes.
 

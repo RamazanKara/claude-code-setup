@@ -309,6 +309,9 @@ exit 0
 
 
 def cmd_run(args, cfg):
+    if os.environ.get('COMPUTERNAME', '').upper() == 'RAMAZANSIDEAPAD' and not args.ssh:
+        print('laptop.py: already running on the laptop; run this command locally instead of offloading over SSH', file=sys.stderr)
+        return 1
     command_parts = list(args.command)
     if command_parts and command_parts[0] == '--':
         command_parts = command_parts[1:]

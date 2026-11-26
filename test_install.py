@@ -1178,6 +1178,23 @@ class WorkerToolTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn('| end-marker', done.stdout)
 
+    def test_claude_env_resolves_orca_selected_profile_and_disallows_valid_tools(self):
+        spec = importlib.util.spec_from_file_location('worker_tool', install.REPO / 'tools' / 'worker.py')
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertNotIn('MultiEdit', mod.READONLY_DISALLOWED)
+        with tempfile.TemporaryDirectory() as tmp:
+            orca = Path(tmp) / 'orca'
+            prof = orca / 'claude-profiles' / 'p1' / 'home'
+            prof.mkdir(parents=True)
+            (orca / 'claude-profiles' / 'selected-host').write_text(str(prof) + '\n', encoding='utf-8')
+            with patch.dict(os.environ, {'ORCA_USER_DATA_PATH': str(orca)}, clear=False):
+                os.environ.pop('CLAUDE_CONFIG_DIR', None)
+                resolved = mod.claude_env()
+                self.assertEqual(resolved.get('CLAUDE_CONFIG_DIR'), str(prof))
+            with patch.dict(os.environ, {'ORCA_USER_DATA_PATH': str(orca), 'CLAUDE_CONFIG_DIR': 'explicit'}, clear=False):
+                self.assertEqual(mod.claude_env().get('CLAUDE_CONFIG_DIR'), 'explicit')
+
 
 class LaptopToolTests(unittest.TestCase):
     def setUp(self):
@@ -1199,6 +1216,11 @@ class LaptopToolTests(unittest.TestCase):
         self.assertIn('$KeepWorktree = $true', cpu_ps)
 
     def test_refuses_push_to_main_and_parses_status_json(self):
+        self_run = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'laptop.py'),
+                                   'run', '--branch', 'wip/x', '--', 'echo hi'],
+                                  capture_output=True, text=True, env={**os.environ, 'COMPUTERNAME': 'RAMAZANSIDEAPAD'})
+        self.assertEqual(self_run.returncode, 1)
+        self.assertIn('already running on the laptop', self_run.stderr)
         done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'laptop.py'),
                                'run', '--branch', 'main', '--push', '--', 'echo hi'],
                               capture_output=True, text=True)
