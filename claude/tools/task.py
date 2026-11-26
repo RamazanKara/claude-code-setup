@@ -9,6 +9,8 @@
   task.py close NAME                 undo those, newest first, then delete the folder
   task.py sweep [--json]             list task folders that look finished; deletes nothing
   task.py daily                      the SessionStart hook: one line, at most once a day
+  task.py caches [--days N] [--apply] [--json]
+                                     list Cargo target folders idle N days (3); --apply deletes them
 
 ~/.claude/machine.json says where the folders go on this machine:
 
@@ -18,7 +20,11 @@
    "hosts": {"nuc": {"ssh": "nuc", "shell": "sh", "roots": ["/mnt/hdd2"]}},
    "ssh": "C:/Windows/System32/OpenSSH/ssh.exe"}   only when the ssh on PATH is the wrong one
 
-Only `close` deletes, and only what the task itself can have made. A folder elsewhere must lie in
+`caches` looks below the artifact folder and the roots for Cargo target folders, whose content Cargo
+can build again. It leaves out what is kept, links, the pools of build locks (Rubylight prunes those
+with `tools/build_lock.py --prune`) and a target beside or in a checkout that git worked in lately.
+
+Apart from `caches --apply`, only `close` deletes, and only what the task itself can have made. A folder elsewhere must lie in
 the temp folder or a root and hold none of those, be no link, hold no checkout and nothing kept, and
 have been made after the task was opened; where the file system keeps no creation time (Linux) it
 must be <root>/NAME or lie in it. A process must still have the start time it was recorded with. A
@@ -33,6 +39,9 @@ HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 SLACK = 2  # seconds a clock or a file system may be off
 IDLE_DAYS = 3
+DEPTH = 4  # how far below the artifact folder or a root `caches` looks for a target folder
+MARKERS = ('.rustc_info.json', 'CACHEDIR.TAG')
+CARGO_FILES = (*MARKERS, '.cargo-lock', '.future-incompat-report.json', '.rubylight-checkout')  # the last: Rubylight's dev.py
 SHELLS = {'powershell': ['powershell', '-NoProfile', '-NonInteractive', '-Command'], 'pwsh': ['pwsh', '-NoProfile', '-NonInteractive', '-Command'],
           'bash': ['bash', '-c'], 'sh': ['sh', '-c'], 'cmd': ['cmd', '/c']}
 
@@ -591,6 +600,133 @@ def sweep(cfg, as_json):
         print(f'  {r["name"]}: idle {r["idle_days"]} days' + (', on the keep list' if r['kept'] else ''))
 
 
+def entries(folder):
+    try:
+        with os.scandir(folder) as found:
+            return list(found)
+    except OSError:
+        return []
+
+
+def folders(folder):
+    """The folders directly in `folder` that are no links."""
+    return [entry.path for entry in entries(folder) if entry.is_dir(follow_symlinks=False) and not linked(entry.path)]
+
+
+def profile(folder):
+    """A build profile, or a target triple that holds some."""
+    return any(os.path.isdir(os.path.join(here, '.fingerprint')) for here in (folder, *folders(folder)))
+
+
+def cargo_target(folder):
+    """A folder Cargo made says so in its CACHEDIR.TAG. One that was there before Cargo built into it has none, and
+    counts only when it holds nothing but Cargo's: a task folder used as target dir also holds logs and evidence."""
+    try:
+        with open(os.path.join(folder, 'CACHEDIR.TAG'), encoding='utf-8', errors='replace') as f:
+            if 'created by cargo' in f.read(1000) and os.path.isfile(os.path.join(folder, '.rustc_info.json')):
+                return True
+    except OSError:
+        pass
+    if not any(os.path.isdir(os.path.join(folder, name, '.fingerprint')) for name in ('debug', 'release')):
+        return False
+    return all(entry.name in CARGO_FILES if not entry.is_dir(follow_symlinks=False) else
+               entry.name in ('doc', 'package', 'tmp') or profile(entry.path) for entry in entries(folder))
+
+
+def pooled(path):
+    """A slot of a build lock's target pool, or a pool itself; whoever holds the locks prunes it."""
+    return (any('target-pool' in part.lower() for part in real(path).replace('\\', '/').split('/'))
+            or any(os.path.exists(path + suffix) for suffix in ('.lock', '.holder')))
+
+
+def last_built(target):
+    """The latest change to a target folder, its profiles (also below a target triple) and their fingerprints."""
+    latest = newest(target)
+    for outer in folders(target):
+        latest = max(latest, newest(outer))
+        for here in (outer, *folders(outer)):
+            fingerprints = os.path.join(here, '.fingerprint')
+            if os.path.isdir(fingerprints):
+                latest = max(latest, newest(here), newest(fingerprints))
+    return latest
+
+
+def size_of(folder):
+    total, todo = 0, [folder]
+    while todo:
+        for entry in entries(todo.pop()):
+            if entry.is_dir(follow_symlinks=False):
+                if not linked(entry.path):
+                    todo.append(entry.path)
+            else:
+                with contextlib.suppress(OSError):
+                    total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
+def targets(cfg, days):
+    """The Cargo target folders that may go: below the artifact folder and the roots, and idle `days` days."""
+    now, found, seen = time.time(), [], set()
+    todo = [(root, 0, ()) for root in (cfg['artifacts'], *cfg['roots'])]
+    while todo:
+        folder, depth, trees = todo.pop()
+        inner = folders(folder)
+        trees += tuple(tree for tree in (folder, *inner) if os.path.exists(os.path.join(tree, '.git')))
+        for path in inner:
+            if real(path) in seen or pooled(path):
+                continue
+            seen.add(real(path))
+            if not cargo_target(path):
+                if depth + 1 < DEPTH:
+                    todo.append((path, depth + 1, trees))
+                continue
+            if kept(path, cfg) or os.path.exists(os.path.join(path, '.git')) or os.path.exists(os.path.join(path, 'task.json')):
+                continue
+            idle = (now - last_built(path)) / 86400
+            if idle < days or any((now - last_used(tree)) / 86400 < days for tree in set(trees) - {path}):
+                continue
+            found.append({'path': path, 'bytes': size_of(path), 'idle_days': round(idle, 1)})
+    return sorted(found, key=lambda row: -row['bytes'])
+
+
+def clear(target):
+    """Delete a target folder. What marks it as one goes last, so that a later run finds what a locked file left."""
+    errors = []
+    for entry in sorted(entries(target), key=lambda entry: entry.name in MARKERS):
+        if errors and entry.name in MARKERS:
+            break
+        try:
+            remove(entry.path)
+        except OSError as error:
+            errors.append(error)
+    if errors:
+        raise errors[0]
+    remove(target)
+
+
+def caches(cfg, days, apply, as_json):
+    found, freed, failed = targets(cfg, days), 0, []
+    total = sum(row['bytes'] for row in found)
+    for row in found if apply else []:
+        try:
+            clear(row['path'])
+        except OSError as error:
+            failed.append({'path': row['path'], 'error': str(error)})
+        freed += row['bytes'] - (size_of(row['path']) if os.path.lexists(row['path']) else 0)
+    if as_json:
+        return print(json.dumps({'applied': apply, 'days': days, 'targets': found, 'total_bytes': total, 'freed_bytes': freed,
+                                 'failed': failed}, indent=1))
+    for row in found:
+        print(f'{row["bytes"] / 1e9:8.2f} GB  idle {row["idle_days"]:6.1f} days  {row["path"]}')
+    print(f'{len(found)} Cargo target folders idle {days:g} days or more, {total / 1e9:.2f} GB')
+    if not apply:
+        tool = os.path.abspath(__file__).replace('\\', '/')
+        return print(f'dry run, nothing deleted; to delete them: python "{tool}" caches --days {days:g} --apply')
+    for row in failed:
+        print(f'FAILED {row["path"]}: {row["error"]}')
+    print(f'freed {freed / 1e9:.2f} GB, {len(failed)} failed')
+
+
 def daily():
     """One line for a new session when task folders look finished, at most once a day; never an error."""
     stamp = os.environ.get('CLAUDE_TASK_STAMP') or os.path.join(HOME, 'task-daily.stamp')
@@ -624,6 +760,10 @@ def main():
     adding.add_argument('--why', help='what the command puts back')
     sub.add_parser('sweep').add_argument('--json', action='store_true')
     sub.add_parser('daily')
+    caching = sub.add_parser('caches')
+    caching.add_argument('--days', type=float, default=IDLE_DAYS)
+    caching.add_argument('--apply', action='store_true')
+    caching.add_argument('--json', action='store_true')
     args = ap.parse_args()
     if args.action == 'daily':
         try:
@@ -638,6 +778,8 @@ def main():
         add(cfg, args)
     elif args.action == 'close':
         close(cfg, args.name)
+    elif args.action == 'caches':
+        caches(cfg, args.days, args.apply, args.json)
     else:
         sweep(cfg, args.json)
 
