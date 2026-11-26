@@ -79,7 +79,7 @@ class InstallerTests(unittest.TestCase):
         install.set_hooks(config)
         groups = config['hooks']['PreToolUse']
         self.assertEqual([[hook['command'] for hook in group['hooks']] for group in groups][0], ['mine'])
-        self.assertEqual((len(groups), groups[1]['hooks'][0]['args'][1]), (2, 'push'))
+        self.assertEqual((len(groups), groups[1]['hooks'][0]['args'][1]), (3, 'push'))
 
     def test_install_migration_backups_dry_run_and_idempotency(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
@@ -148,7 +148,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIs(settings['autoMemoryEnabled'], False)  # memory off since 2026-11-20; lasting facts go in rules
                 gate = (home / 'hooks' / 'review_gate.py').as_posix()
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['PreToolUse']],
-                                 [('Bash|PowerShell', [gate, 'push'])])
+                                 [('Bash|PowerShell', [gate, 'push']), ('Bash|PowerShell', [(home / 'hooks' / 'cargo_pool.py').as_posix()])])
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['SubagentStop']],
                                  [('reviewer', [gate, 'reviewed'])])
                 self.assertNotIn('SubagentStart', settings['hooks'])  # the retired advisor guard's entry is gone
@@ -910,6 +910,56 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIsNone(self.push())
         done = subprocess.run([sys.executable, str(self.GATE), 'push'], input='not json', capture_output=True, text=True, env=self.env)
         self.assertEqual((done.returncode, done.stdout), (0, ''))
+
+
+class CargoPoolHookTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.pool, self.other = self.root / 'ruby light', self.root / 'other'
+        for repo in (self.pool, self.other):
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        (self.pool / 'tools').mkdir()
+        (self.pool / 'tools' / 'build_lock.py').write_text('', encoding='utf-8')
+
+    def hook(self, command, cwd=None):
+        done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'cargo_pool.py')], capture_output=True, text=True,
+                              input=json.dumps({'cwd': str(cwd or self.pool), 'tool_input': {'command': command}}))
+        self.assertEqual((done.returncode, done.stderr), (0, ''), command)
+        return json.loads(done.stdout)['hookSpecificOutput'] if done.stdout.strip() else None
+
+    def test_a_bare_cargo_build_in_the_pool_checkout_is_denied(self):
+        for command in ('cargo test -p x', 'cargo +nightly --locked clippy --all-targets', 'cargo nextest run',
+                        'python tools/build_lock.py --lane cargo -- cargo test -p x', 'RUSTFLAGS=-g cargo build 2>&1 | tail -5',
+                        '& "C:\\Users\\a b\\.cargo\\bin\\cargo.exe" check', 'cd rust && cargo run', 'pwsh -Command "cargo bench"',
+                        'git status\ncargo doc'):
+            said = self.hook(command)
+            self.assertEqual(said and said['permissionDecision'], 'deny', command)
+        self.assertIn('python tools/dev.py cargo -- <args>', said['permissionDecisionReason'])
+        for command in (f'cd "{self.pool}" && cargo test', f'cargo build --manifest-path "{self.pool / "Cargo.toml"}"'):
+            self.assertIsNotNone(self.hook(command, self.other), command)
+
+    def test_other_commands_pass(self):
+        for command in ('python tools/dev.py cargo -- test -p x', 'tools\\dev.ps1 check', 'CARGO_TARGET_DIR=/tmp/t cargo test',
+                        "$env:CARGO_TARGET_DIR = 'D:\\t'; cargo build", 'cargo build --target-dir /tmp/t',
+                        '. C:\\src\\rl-env.ps1; Enter-RlSlot $repo; cargo test', 'cargo fmt --all', 'cargo metadata', 'cargo tree',
+                        'cargo --version', 'cargo locate-project', 'cargo pkgid', 'cargo search build', 'cargo test  # POOL_SKIP=pool is full',
+                        'git commit -m "fix: x\n\ncargo test passes"', "cat <<'EOF' > a.md\ncargo test\nEOF", 'ssh nuc "cd x && cargo build"',
+                        'rg "cargo build" docs'):
+            self.assertIsNone(self.hook(command), command)
+        self.assertIsNone(self.hook('cargo test -p x', self.other))
+        self.assertIsNone(self.hook(f'cd "{self.other}" && cargo test'))
+
+    def test_its_own_errors_let_the_command_run(self):
+        done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'cargo_pool.py')], input='not json', capture_output=True, text=True)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, '', ''))
+
+    def test_installer_registers_it_for_both_shells(self):
+        config = {}
+        install.set_hooks(config)
+        entry = [g for g in config['hooks']['PreToolUse'] if 'cargo_pool.py' in json.dumps(g)]
+        self.assertEqual([g['matcher'] for g in entry], ['Bash|PowerShell'])
 
 
 class CostReportTests(unittest.TestCase):

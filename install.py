@@ -105,11 +105,12 @@ def clean_claude(config):
 # event, matcher, script, its arguments
 HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
          ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
+         ('PreToolUse', 'Bash|PowerShell', 'cargo_pool.py', ()),
          ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)),
          ('SessionStart', None, 'fresh_checkout.py', ()))
 RETIRED_TOOLS = ('deepseek.py',)  # replaced by oc.py on 2026-11-20; it still offered DeepSeek Pro
 RETIRED_HOOKS = ('advisor_guard.py', 'tools/task.py')  # their entries go; the scripts stay for sessions started before
-TIMEOUTS = {'fresh_checkout.py': 60}  # a fetch, then a fast-forward that must not be stopped half-way
+TIMEOUTS = {'cargo_pool.py': 20, 'fresh_checkout.py': 60}  # a fetch, then a fast-forward that must not be stopped half-way
 
 
 def set_hooks(config):
