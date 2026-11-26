@@ -153,8 +153,9 @@ class InstallerTests(unittest.TestCase):
                                  [('reviewer', [gate, 'reviewed'])])
                 self.assertNotIn('SubagentStart', settings['hooks'])  # the retired advisor guard's entry is gone
                 self.assertTrue((agents / 'reviewer.md').exists())
-                skill = home / 'skills' / 'issue-batch' / 'SKILL.md'
-                self.assertEqual(skill.read_bytes(), (install.REPO / 'skills' / 'issue-batch' / 'SKILL.md').read_bytes())
+                for name in ('issue-batch', 'merge-train', 'public-copy'):
+                    skill = home / 'skills' / name / 'SKILL.md'
+                    self.assertEqual(skill.read_bytes(), (install.REPO / 'skills' / name / 'SKILL.md').read_bytes())
                 self.assertFalse((home / 'tools' / 'deepseek.py').exists())  # retired for oc.py
                 self.assertTrue((first.backup / 'tools' / 'deepseek.py').exists())
                 for tool in ('oc.py', 'memory_sync.py', 'task.py'):

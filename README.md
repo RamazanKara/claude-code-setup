@@ -69,6 +69,8 @@ Edit templates here before reinstalling. Keep machine-specific paths in `~/.clau
 - `opencode/agents/`: DeepSeek V4.1 Flash subagents for GLM 5.3 as orchestrator: scout (low effort, may not edit), mechanic (high), runner (low), coder (max) and reviewer (max, may not edit).
 - `claude/tools/oc.py`: hands a read, write, code or review task to Claude Code (the default) or to DeepSeek V4.1 Flash through OpenCode at the effort the task needs; waits and prints only the report.
 - `claude/skills/issue-batch/`: a list of issues through Orca, run by Claude Code or, when Claude's usage is spent, by GLM 5.3 or DeepSeek V4.1 Flash in OpenCode: one code worker per issue (Claude Sonnet, or DeepSeek on request and from OpenCode), one builder that cherry-picks the fixes and runs the gate once, one review of the integrated range (Opus from Claude Code, the `reviewer` subagent from OpenCode) and one landing; up to 8 code workers at once.
+- `claude/skills/merge-train/`: many pending requests folded into one `issue-batch` and then a release through the project's `release-prep`: collect, triage, code first, one review of the release range, replies.
+- `claude/skills/public-copy/`: public text in the user's voice (Reddit, README, release notes, replies): plain and human, own measurements only, no AI tells.
 - `claude/tools/task.py`: one folder per task, a record of what a task leaves elsewhere, and the close that undoes it.
 - `claude/tools/memory_sync.py`: keeps a memory folder the same on this machine and one other, both ways, over ssh.
 - `claude/machine.example.json`: where task folders go on a machine and what is never deleted.
