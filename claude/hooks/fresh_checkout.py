@@ -123,8 +123,20 @@ def others_in(top, me, transcript=None):
     return found
 
 
-def say(text):
-    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': text}}))
+def is_antigravity(event):
+    return isinstance(event, dict) and any(k in event for k in ('conversationId', 'workspacePaths', 'hookEventName', 'transcriptPath'))
+
+
+def say(text, agy=False):
+    if agy:
+        print(json.dumps({'injectSteps': [{'systemMessage': {'systemMessage': text}}]}))
+    else:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': text}}))
+
+
+def silent(agy=False):
+    if agy:
+        print('{}')
 
 
 def rules_in(top, *span):
@@ -132,36 +144,42 @@ def rules_in(top, *span):
 
 
 def main():
-    if os.environ.get('CLAUDE_FRESH_CHECKOUT', '1').strip() == '0':
-        return
     try:
         event = json.load(sys.stdin)
     except ValueError:
         event = {}
+    agy = is_antigravity(event)
+    if os.environ.get('CLAUDE_FRESH_CHECKOUT', '1').strip() == '0':
+        return silent(agy)
     if not isinstance(event, dict) or event.get('source') == 'compact':
-        return
+        return silent(agy)
     began = time.monotonic()
-    top = git(event.get('cwd') or os.getcwd(), 'rev-parse', '--show-toplevel')
+    cwd = event.get('cwd') or ((event.get('workspacePaths') or [''])[0]) or os.getcwd()
+    top = git(cwd, 'rev-parse', '--show-toplevel')
     branch = top and git(top, 'symbolic-ref', '--quiet', '--short', 'HEAD')
     if branch not in BRANCHES:
-        return
+        return silent(agy)
     upstream = git(top, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
     remote = upstream and git(top, 'config', f'branch.{branch}.remote')
     if not ({'GIT_SSH_COMMAND', 'GIT_SSH'} & set(ENV)) and not git(top, 'config', 'core.sshCommand'):
         ENV['GIT_SSH_COMMAND'] = 'ssh -o BatchMode=yes'  # no prompt; a user's own ssh setting wins
     if not upstream or not remote or not upstream.startswith(remote + '/'):
-        return
+        return silent(agy)
     if git(top, 'fetch', '--quiet', '--no-tags', '--no-recurse-submodules', remote, upstream[len(remote) + 1:], timeout=15) is None:
-        return
+        return silent(agy)
     try:
         ahead, behind = map(int, git(top, 'rev-list', '--left-right', '--count', f'HEAD...{upstream}').split())
     except (AttributeError, ValueError):
-        return
+        return silent(agy)
     if not behind:
-        return
+        return silent(agy)
     gitdir = git(top, 'rev-parse', '--absolute-git-dir') or ''
     dirty = git(top, 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all', timeout=10)
-    others = others_in(top, event.get('session_id'), event.get('transcript_path'))
+    sid = event.get('session_id') or event.get('conversationId')
+    transcript = event.get('transcript_path') or event.get('transcriptPath')
+    others = others_in(top, sid, transcript)
+    if agy and others is None:
+        others = 0  # Antigravity may run on a machine without ~/.claude/sessions
     why = ('it holds commits of its own' if ahead else
            'a merge, rebase or cherry-pick is under way' if any(os.path.exists(os.path.join(gitdir, n)) for n in UNDER_WAY) else
            'it has edits to tracked files' if dirty else
@@ -175,13 +193,13 @@ def main():
         changed = rules_in(top, f'HEAD...{upstream}')
         return say(f'This checkout ({top}, {branch}) is {behind} commits behind {upstream} and was left as it is because {why}. '
                    + stale + (f' Rule files changed upstream: {", ".join(changed)}; read them with `git show {upstream}:<path>` '
-                              'before relying on the copy in your context.' if changed else ''))
+                              'before relying on the copy in your context.' if changed else ''), agy)
     old = git(top, 'rev-parse', 'HEAD')
     if git(top, 'merge', '--ff-only', '--no-overwrite-ignore', '--quiet', upstream, timeout=None) is None:  # never cut short
         left = git(top, 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all', timeout=10)
         return say(f'This checkout ({top}, {branch}) is {behind} commits behind {upstream} and the fast-forward failed'
                    + (' part-way: tracked files now differ from HEAD (`git status`); a file another program holds open is the '
-                      'usual cause.' if left else '.') + ' ' + stale)
+                      'usual cause.' if left else '.') + ' ' + stale, agy)
     moved = [line.split('\t', 1)[-1] for line in (git(top, 'diff', '--raw', '--ignore-submodules=none', old, 'HEAD') or '').splitlines()
              if line.startswith(':160000') or ' 160000 ' in line]
     changed = rules_in(top, old, 'HEAD')
@@ -189,7 +207,7 @@ def main():
         + (f' Changed with it: {", ".join(changed)}. The copy in your context was loaded before this update: read the '
            'file again before relying on its rules.' if changed else '')
         + (f' Submodules moved and were not updated: {", ".join(moved)} (`git submodule update --init <path>` before '
-           'building).' if moved else ''))
+           'building).' if moved else ''), agy)
 
 
 if __name__ == '__main__':

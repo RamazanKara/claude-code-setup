@@ -39,9 +39,12 @@ SKIP = re.compile(r'REVIEW_SKIP\s*[=:]\s*[\'"]?([^\'";\n]+)', re.I)
 
 
 def git(repo, *args):
-    done = subprocess.run(['git', '-c', 'core.quotepath=off', '-C', repo, *args], capture_output=True, text=True,
-                          encoding='utf-8', errors='replace', timeout=15)
-    return done.stdout.strip() if done.returncode == 0 else None
+    try:
+        done = subprocess.run(['git', '-c', 'core.quotepath=off', '-C', repo, *args], capture_output=True, text=True,
+                              encoding='utf-8', errors='replace', timeout=15)
+        return done.stdout.strip() if done.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def base_of(repo, tip='HEAD'):
@@ -167,41 +170,79 @@ def unreviewed(top, marks):
     return new, covered, True
 
 
-def deny(why):
-    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
-                                             'permissionDecisionReason': why}}))
+def is_antigravity(event):
+    """True when stdin matches Antigravity's camelCase hook payload instead of Claude Code's snake_case."""
+    return isinstance(event, dict) and any(k in event for k in ('toolCall', 'hookEventName', 'conversationId', 'workspacePaths'))
+
+
+def extract_command(event):
+    if not isinstance(event, dict):
+        return ''
+    if 'toolCall' in event:
+        args = (event.get('toolCall') or {}).get('args') or {}
+        return str(args.get('CommandLine') or args.get('command') or '')
+    return str((event.get('tool_input') or {}).get('command') or '')
+
+
+def extract_cwd(event):
+    if not isinstance(event, dict):
+        return os.getcwd()
+    cwd = event.get('cwd')
+    if cwd:
+        return cwd
+    paths = event.get('workspacePaths') or []
+    return paths[0] if paths else os.getcwd()
+
+
+def allow(event=None):
+    """Antigravity PreToolUse requires explicit JSON on allow; Claude Code expects silence."""
+    if is_antigravity(event):
+        print(json.dumps({'decision': 'allow'}))
+
+
+def deny(why, event=None):
+    if is_antigravity(event):
+        print(json.dumps({'decision': 'deny', 'reason': why}))
+    else:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+                                                 'permissionDecisionReason': why}}))
 
 
 def push(event, least):
-    command = str((event.get('tool_input') or {}).get('command') or '')
+    """Judge a push command. Returns True if denied, False if allowed."""
+    command = extract_command(event)
     if least <= 0 or 'push' not in command:
-        return
-    top, before, tip = pushed(command, event.get('cwd') or os.getcwd())
+        return False
+    top, before, tip = pushed(command, extract_cwd(event))
     base = base_of(top, tip) if top else None
     fresh = bool(top) and not base and tip != 'HEAD'  # a branch this command creates before it pushes it
     if fresh:
         tip, base = 'HEAD', base_of(top)
     if not base:
-        return
+        return False
     made = {m.group('verb').lower() for m in MADE.finditer(before)}
     skip = SKIP.search(command)
     reason = skip.group(1).strip()[:200] if skip else None
     if made - {'commit'}:  # commits that do not exist yet and are not in the working tree either
         if skip:
-            return log(repo=top, decision='skipped', reason=reason)
+            log(repo=top, decision='skipped', reason=reason)
+            return False
         log(repo=top, decision='held', reason='commits brought in by the same command', agent=event.get('agent_type'))
-        return deny('Push held back: this command brings in commits and pushes them at once, so the review hook cannot see '
-                    'what the push carries. Run the push as a command of its own.')
+        deny('Push held back: this command brings in commits and pushes them at once, so the review hook cannot see '
+             'what the push carries. Run the push as a command of its own.', event)
+        return True
     tree = fresh or 'commit' in made and tip == 'HEAD'  # that commit does not exist yet, and what it takes is not ours to guess
     marks = changes(top, base, tip, tree)
     total = sum(sum(file.values()) for file in marks.values())
     if total < least:
-        return
+        return False
     if skip:
-        return log(repo=top, lines=total, decision='skipped', reason=reason)
+        log(repo=top, lines=total, decision='skipped', reason=reason)
+        return False
     new, covered, noted = unreviewed(top, marks)
     if noted and (new == 0 or covered and new <= min(FIX_LINES, covered)):  # fixes, not a change larger than what was reviewed
-        return log(repo=top, lines=total, decision='reviewed', since_review=new)
+        log(repo=top, lines=total, decision='reviewed', since_review=new)
+        return False
     log(repo=top, lines=total, decision='held', since_review=new if covered else None, agent=event.get('agent_type'),
         **({'counted': 'checkout'} if tree else {}))
     what = (f'{new} changed code lines came after the last review, more than its margin for fixes' if covered else
@@ -211,22 +252,25 @@ def push(event, least):
                  'staged or not. If the push takes less, make the commit first and push in a command of its own, which is '
                  'judged by the commits it pushes. If it takes all of it')
         if event.get('agent_type') in HELPERS:
-            return deny(f'Push held back: {what}, do not retry; report this to the agent that sent you, which must have the '
-                        'diff reviewed first.')
+            deny(f'Push held back: {what}, do not retry; report this to the agent that sent you, which must have the '
+                 'diff reviewed first.', event)
+            return True
         what += ', it needs a review'
     elif event.get('agent_type') in HELPERS:
-        return deny(f'Push held back: {what}. Do not retry; report this to the agent that sent you, which must have the diff reviewed first.')
+        deny(f'Push held back: {what}. Do not retry; report this to the agent that sent you, which must have the diff reviewed first.', event)
+        return True
     span = f'the working tree against {base[:10]}' if tree else f'the range {base[:10]}..{tip}'
-    deny(f'Push held back: {what}. Run `python ~/.claude/tools/oc.py review --dir {top} "<brief>"` in the background, the brief '
-         f'naming {span} and, in the words of the user, the request this change answers; fix what it finds, then push again; '
+    deny(f'Push held back: {what}. Run the `reviewer` subagent or `python ~/.claude/tools/worker.py review --dir {top} "<brief>"`, '
+         f'the brief naming {span} and, in the words of the user, the request this change answers; fix what it finds, then push again; '
          f'fixes of up to {FIX_LINES} lines need no second review unless a finding was High. A finished review counts on its '
          'own. If the user asked for '
          'this change to go out fast, repeat the push with the comment `# REVIEW_SKIP=<reason>` at the end of the command; '
-         'skips are logged.')
+         'skips are logged.', event)
+    return True
 
 
 def reviewed(event):
-    if event.get('agent_type') not in (None, 'reviewer'):
+    if event.get('agent_type') not in (None, 'reviewer', 'wave-reviewer'):
         return
     said = re.search(r'^\s*Reviewed:\s*`?([^`\n]+?)`?\s*$', str(event.get('last_assistant_message') or ''), re.M)
     repo = local(said.group(1).strip(), event.get('cwd') or os.getcwd()) if said else ''
@@ -245,8 +289,8 @@ def main():
     event = json.load(sys.stdin)
     if sys.argv[1:] == ['reviewed']:
         reviewed(event)
-    else:
-        push(event, least)
+    elif not push(event, least):
+        allow(event)
 
 
 if __name__ == '__main__':

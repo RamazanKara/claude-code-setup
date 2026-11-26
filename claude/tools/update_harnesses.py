@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""Update the agent harnesses (Claude Code, Codex, OpenCode, Antigravity), Orca and these rules, here
+"""Update the agent harnesses (Claude Code, Antigravity, optional Codex), Orca and these rules, here
 and on the laptop, in one call.
 
   python update_harnesses.py                 # this machine
   python update_harnesses.py --laptop        # this machine, then the laptop over ssh
   python update_harnesses.py --only-laptop   # the laptop only
   python update_harnesses.py --orca          # also close a running Orca to upgrade it
-  python update_harnesses.py --force         # also stop running Codex/OpenCode sessions to update them
+  python update_harnesses.py --force         # also stop running Codex sessions to update it
 
 In order, on each machine: fast-forward the rules checkout (C:\\src\\claude-code-setup) when it is on main
-and clean, and run its install.py when that brought new commits; `claude update`; Codex and OpenCode
-from npm when npm has a newer version; `agy update`; Orca through winget when winget offers a newer
-version; then `orca skills update`. A before/after table of versions ends each machine's run.
+and clean, and run its install.py when that brought new commits; `claude update`; Codex from npm if already
+installed and outdated; `agy update`; Orca through winget when winget offers a newer version; then
+`orca skills update`. A before/after table of versions ends each machine's run.
 
-Windows will not replace a running exe. OpenCode's background `serve --service` process is stopped
-before its update when nothing else holds the exe; this script does not start it again. Any other running Codex or OpenCode session
-(an Orca agent, a DeepSeek worker) makes the script skip that update with a FAILED line, unless --force
-is given, which stops those sessions. Claude Code and agy update beside running sessions.
+Windows will not replace a running exe. Any running Codex session makes the script skip its update with a
+FAILED line unless --force is given. Claude Code and agy update beside running sessions.
 
 Orca is only upgraded when it is not running, or with --orca. The installer closes Orca, and with it
 every agent session inside Orca, so --orca is refused when this script itself runs inside Orca (run it
@@ -41,7 +39,7 @@ from pathlib import Path
 
 LAPTOP = 'ramaz@192.168.4.12'
 RULES = Path(r'C:\src\claude-code-setup')
-NPM_PACKAGES = {'codex': '@openai/codex', 'opencode': '@opencode/cli'}
+NPM_PACKAGES = {'codex': '@openai/codex'}
 ORCA_ID = 'StablyAI.Orca'
 ORCA_EXE = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'orca' / 'Orca.exe'
 WINGET_NO_PACKAGE = {0x8A150014, 0x8A150014 - (1 << 32)}  # "no installed package matches", unsigned and signed
@@ -123,9 +121,10 @@ def orca_running():
 
 def versions():
     v = {}
-    for name in ('claude', 'codex', 'opencode', 'agy'):
+    for name in ('claude', 'agy', 'codex'):
         r = run([name, '--version'], timeout=60, quiet=True)
-        v[name] = first_line(r.text) if r.code == 0 else 'missing'
+        if r.code == 0 or name != 'codex':
+            v[name] = first_line(r.text) if r.code == 0 else 'missing'
     r = run(['winget', 'list', '--id', ORCA_ID, '--exact', '--disable-interactivity'], timeout=120, quiet=True)
     line = next((l for l in r.out.splitlines() if ORCA_ID in l), '')
     cols = [c for c in line.split(ORCA_ID, 1)[1].split() if c != 'winget'] if line else []
@@ -166,9 +165,10 @@ def npm_installed():
 def update_npm(force):
     have = npm_installed()
     if have is None:
-        FAILED.append('npm ls -g: output not readable, Codex and OpenCode not updated')
         return
     for name, pkg in NPM_PACKAGES.items():
+        if not have[name]:
+            continue  # only update optional npm harnesses that are already installed
         r = run(['npm', 'view', pkg, 'version'], timeout=120, quiet=True)
         latest = first_line(r.out)
         if r.code != 0 or not latest[:1].isdigit():
@@ -177,21 +177,19 @@ def update_npm(force):
         if latest == have[name]:
             print(f'  {name}: {latest} is current')
             continue
-        print(f'  {name}: {have[name] or "not installed"} -> {latest}')
+        print(f'  {name}: {have[name]} -> {latest}')
         if not free_exe(name, force):
             continue
         run(['npm', 'install', '-g', f'{pkg}@latest'], timeout=600, check=True)
 
 
 def free_exe(name, force):
-    """Stop what holds npm's <name>.exe: the OpenCode service always, sessions only with --force."""
+    """Stop what holds npm's <name>.exe only when --force is passed."""
     found = processes(f'{name}.exe')
     if found is None:
         FAILED.append(f'{name} update skipped: could not list running processes')
         return False
-    procs = [p for p in found if '\\npm\\node_modules\\' in p[1].lower()]
-    service = [p for p in procs if 'serve --service' in p[2]]
-    sessions = [p for p in procs if p not in service]
+    sessions = [p for p in found if '\\npm\\node_modules\\' in p[1].lower()]
     if sessions and force and {p[0] for p in sessions} & ancestors():
         FAILED.append(f'{name} update skipped: --force from inside a {name} session would stop this script')
         return False
@@ -199,10 +197,10 @@ def free_exe(name, force):
         print(f'  {name}: skipped, {len(sessions)} session(s) running (rerun with --force to stop them)')
         FAILED.append(f'{name} update skipped: {len(sessions)} running session(s) (use --force)')
         return False
-    for pid, _, _ in service + sessions:
+    for pid, _, _ in sessions:
         print(f'  {name}: stopping process {pid}')
         stop(pid)
-    if procs:
+    if sessions:
         time.sleep(2)
     return True
 
@@ -301,7 +299,7 @@ def main():
     ap.add_argument('--laptop', action='store_true', help='also update the laptop over ssh')
     ap.add_argument('--only-laptop', action='store_true', help='update the laptop only')
     ap.add_argument('--orca', action='store_true', help='close a running Orca to upgrade it')
-    ap.add_argument('--force', action='store_true', help='stop running Codex/OpenCode sessions to update them')
+    ap.add_argument('--force', action='store_true', help='stop running Codex sessions to update it')
     args = ap.parse_args()
     # agy prints symbols a cp1252 console (the laptop over ssh) cannot show; keep the order with ssh's output.
     sys.stdout.reconfigure(errors='replace', line_buffering=True)

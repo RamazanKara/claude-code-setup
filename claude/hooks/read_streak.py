@@ -12,7 +12,7 @@ The cheap helper agents are skipped: reading is their job.
 """
 import json, os, re, sys, tempfile, time
 
-HELPERS = {'scout', 'runner', 'mechanic'}
+HELPERS = {'scout', 'runner', 'mechanic', 'fast-scout', 'wave-reviewer'}
 REPEAT = 6
 CMD = r'(?:^|[;&|({=]\s*|\n\s*)(?:\.[\\/])?'  # where a command name can start, so a path that contains one is not a call
 READS = re.compile(r'Get-Content|Select-String|Get-ChildItem|\b(cat|head|tail|gc|grep|rg|findstr|ls|dir)\b'
@@ -67,8 +67,8 @@ def main():
     streak = streak_after(event, os.path.join(tempfile.gettempdir(), 'claude-read-streak'))
     if streak < first or (streak - first) % REPEAT:
         return
-    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'oc.py')
-    where = ('`python "' + tool.replace(os.sep, '/') + '" read "<brief>"`') if os.path.exists(tool) else 'a helper'
+    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'worker.py')
+    where = 'the `scout` subagent' + (f' (or `python "{tool.replace(os.sep, "/")}" read "<brief>"`)' if os.path.exists(tool) else '')
     note = (f'{streak} read-only turns in a row with one call each, and every turn re-reads the whole context. '
             f'Put the next independent reads and searches into one turn, or hand a longer survey to {where}.')
     print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolBatch', 'additionalContext': note}}))

@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Install this setup into ~/.claude and the other installed agents.
+"""Install this dual-harness workflow setup into ~/.claude (Claude Code) and ~/.gemini/config (Antigravity).
 
-Copies CLAUDE.md, optional helper agents and the read-streak hook, merges settings.json into
-your existing one, and creates ~/.claude/personal.md from the example once. The same rules, with
-personal.md inlined, are written for OpenCode (~/.config/opencode/AGENTS.md); Codex and
-Antigravity get none, and what this setup once wrote there is removed. opencode/opencode.json is merged into OpenCode's global
-config. Retired helper definitions, deny rules and workflow overrides are removed.
-Anything it replaces is backed up to ~/.claude/backups/claude-code-setup-<time>/ first.
+Copies CLAUDE.md, native agents (`scout`, `coder`, `reviewer`), dual-harness hooks, shared tools
+(`worker.py`, `laptop.py`, `land.py`, `task.py`, `memory_sync.py`, `update_harnesses.py`), and skills
+into ~/.claude, merges settings.json (preserving Orca hooks and marking Orca telemetry async), and
+creates ~/.claude/personal.md and machine.json from examples once.
+
+When ~/.gemini/config exists, also installs Antigravity's GEMINI.md (with personal.md inlined), merges
+a `"workflow-guards"` hook group into ~/.gemini/config/hooks.json (preserving `"orca-status"` and any
+user hook groups), and copies the shared skills into ~/.gemini/config/skills/. Retired Codex files,
+retired tools (`deepseek.py`, `oc.py`), and retired legacy agents are cleaned up. Everything replaced
+is backed up to ~/.claude/backups/claude-code-setup-<time>/ first.
 
 Orca's Claude profiles set CLAUDE_CONFIG_DIR and import ~/.claude/CLAUDE.md,
 so the installer ignores that variable when it points into an Orca profile.
@@ -19,35 +23,33 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT / 'claude'
+AGY_REPO = ROOT / 'antigravity'
 _cfg = os.environ.get('CLAUDE_CONFIG_DIR')
 HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
-OPENCODE = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode'
-SHARED = {'opencode': OPENCODE / 'AGENTS.md'}
-# Codex and Antigravity get no workflow since 2026-11-21: the rules and agents this setup wrote there go.
+GEMINI = Path.home() / '.gemini' / 'config'
+GEMINI_HOOK_GROUP = 'workflow-guards'
+# Codex gets no workflow: the rules and agents this setup once wrote there go.
 RETIRED_HARNESSES = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex'),
-    'antigravity': Path.home() / '.gemini',
 }
 RETIRED_FILES = {  # 'rules': a file that starts with this setup's heading
     'codex': {'AGENTS.md': 'rules',
               'agents/mechanic.toml': 'c61b24599ef9f5b2378ec324bd3d7ae060c9cd6435d349eed44086db6f96beed',
               'agents/runner.toml': '066984ee78aff19a6e47258ad64900efac438503a4398288e0edcbf22ed22927',
               'agents/scout.toml': '2a32f78009a691074643711cff086a5cc7075be94259c3759713eff8e1016267'},
-    'antigravity': {'GEMINI.md': 'rules',
-                    'config/agents/mechanic.md': '9ddc7bdd0daebd0f35291c3ee4994a2d79f20b5a50961c3db63ac7b82422fd85',
-                    'config/agents/runner.md': '970bcf763cf979cfa3ccf77a926d4f846f34bf2864858f5e7d3e03813263d4b0',
-                    'config/agents/scout.md': '05de66d138ed42f3b415ca551282cb5a5e1964580327aaa798768438b5fb9a7a'},
 }
-# Only remove the definitions shipped by this setup; preserve user replacements.
+# Only remove legacy definitions shipped by this setup; preserve user replacements and current agents.
 RETIRED_AGENTS = {
     'claude/architect.md': '9542ffe407ed1894aeddf7549a4f741616ea7fa3076d70a12e42f622ee9218a2',
     'claude/designer.md': 'c77acd7c49f9dc8b2ab05262dc7ec15e2b5e13f3247719703a17796dd16da269',
     'claude/implementer.md': 'ef1e6edbf9a7fc10760df32522ec101751ba0aa21bd3f6d7d024b6e3b66b3479',
     'claude/reviewer.md': 'f95a910b92760caf14010455f749de6936ace734bd5ae268fb7448520d1d37a3',
-    # Haiku helpers, replaced on 2026-11-20 by tools/oc.py on the flat-rate OpenCode models
     'claude/scout.md': '48e91b389171cca16095503d6385a28e96a28a435adf76f94b3b0e46afa978c8',
     'claude/runner.md': '015956d20c1885c9a07a50d93ffce8d0b8c98deaf3908743627054c32eece8a5',
     'claude/mechanic.md': '80b8de644704b025bc6c22f67b8b969ddbd6a2abea1868c31585470342ba68d5',
+    'antigravity/mechanic.md': '9ddc7bdd0daebd0f35291c3ee4994a2d79f20b5a50961c3db63ac7b82422fd85',
+    'antigravity/runner.md': '970bcf763cf979cfa3ccf77a926d4f846f34bf2864858f5e7d3e03813263d4b0',
+    'antigravity/scout.md': '05de66d138ed42f3b415ca551282cb5a5e1964580327aaa798768438b5fb9a7a',
 }
 
 
@@ -91,6 +93,10 @@ def clean_permissions(config, keep=()):
                 del config[key]
 
 
+ASYNC_ORCA_EVENTS = ('PostToolUse', 'PostToolUseFailure', 'PostToolBatch', 'SubagentStart',
+                     'SubagentStop', 'Stop', 'TeammateIdle', 'SessionEnd')
+
+
 def clean_claude(config):
     clean_permissions(config, tool_denies())
     overrides = config.get('skillOverrides', {})
@@ -99,26 +105,42 @@ def clean_claude(config):
             del overrides[skill]
     if not overrides:
         config.pop('skillOverrides', None)
-    config.pop('advisorModel', None)  # the advisor was removed on 2026-11-20
+    config.pop('advisorModel', None)
+    env = config.get('env')
+    if isinstance(env, dict) and env.get('CLAUDE_CODE_SUBAGENT_MODEL') == 'opus':
+        del env['CLAUDE_CODE_SUBAGENT_MODEL']
+        if not env:
+            config.pop('env', None)
+    hooks = config.get('hooks')
+    if isinstance(hooks, dict):
+        for event in ASYNC_ORCA_EVENTS:
+            for group in hooks.get(event) or ():
+                if isinstance(group, dict) and isinstance(group.get('hooks'), list):
+                    for hook in group['hooks']:
+                        if isinstance(hook, dict) and 'orca-agent-hook' in str(hook.get('command', '')):
+                            hook['async'] = True
 
 
 # event, matcher, script, its arguments
 HOOKS = (('PostToolBatch', None, 'read_streak.py', ()),
-         ('PreToolUse', 'Bash|PowerShell', 'review_gate.py', ('push',)),
-         ('PreToolUse', 'Bash|PowerShell', 'cargo_pool.py', ()),
-         ('SubagentStop', 'reviewer', 'review_gate.py', ('reviewed',)),
-         ('SessionStart', None, 'fresh_checkout.py', ()))
-RETIRED_TOOLS = ('deepseek.py',)  # replaced by oc.py on 2026-11-20; it still offered DeepSeek Pro
-RETIRED_HOOKS = ('advisor_guard.py', 'tools/task.py')  # their entries go; the scripts stay for sessions started before
-TIMEOUTS = {'cargo_pool.py': 20, 'fresh_checkout.py': 60}  # a fetch, then a fast-forward that must not be stopped half-way
+         ('PreToolUse', 'Bash|PowerShell', 'pre_bash.py', ()),
+         ('SubagentStop', 'reviewer|wave-reviewer', 'review_gate.py', ('reviewed',)),
+         ('SessionStart', None, 'fresh_checkout.py', ()),
+         ('SessionStart', None, 'tools/task.py', ('daily',)))
+RETIRED_TOOLS = ('deepseek.py', 'oc.py')  # replaced by worker.py (Claude Code <-> Antigravity)
+RETIRED_HOOKS = ('advisor_guard.py',)
+# Superseded PreToolUse entries merged into pre_bash.py (review_gate.py stays registered on SubagentStop).
+SUPERSEDED_PRE_TOOL = ('review_gate.py', 'cargo_pool.py')
+TIMEOUTS = {'pre_bash.py': 20, 'fresh_checkout.py': 60, 'tools/task.py': 5}
 
 
 def set_hooks(config):
-    """Add this setup's hooks to settings, replacing earlier entries for the same scripts."""
-    for groups in config.get('hooks', {}).values():
+    """Add this setup's Claude Code hooks to settings, replacing earlier entries for the same scripts."""
+    for event, groups in config.get('hooks', {}).items():
         for group in groups:
             if isinstance(group, dict) and isinstance(group.get('hooks'), list):
-                group['hooks'] = [hook for hook in group['hooks'] if not any(name in json.dumps(hook) for name in RETIRED_HOOKS)]
+                drop = (*RETIRED_HOOKS, *(SUPERSEDED_PRE_TOOL if event == 'PreToolUse' else ()))
+                group['hooks'] = [hook for hook in group['hooks'] if not any(name in json.dumps(hook) for name in drop)]
         groups[:] = [g for g in groups if not (isinstance(g, dict) and g.get('hooks') == [])]
     config['hooks'] = {event: groups for event, groups in config.get('hooks', {}).items() if groups}
     for event, matcher, name, args in HOOKS:
@@ -135,30 +157,26 @@ def set_hooks(config):
         groups[:] = [g for g in groups if g.get('hooks') != []] + [entry]
 
 
-def clean_opencode(config):
-    clean_permissions(config)
-    agents = config.get('agents', {})
-    for name in ('explore', 'title', 'summary'):
-        if agents.get(name, {}).get('model') == 'opencode-go/deepseek-v4.1-flash':
-            del agents[name]['model']
-            if not agents[name]:
-                del agents[name]
-    if agents.get('general', {}).get('disabled') is True:
-        del agents['general']['disabled']
-        if not agents['general']:
-            del agents['general']
-    if not agents:
-        config.pop('agents', None)
-    # Claude runs in Claude Code, not on Anthropic's API through OpenCode: the context limits once set for it go
-    providers = config.get('providers', {})
-    models = providers.get('anthropic', {}).get('models', {})
-    for name, model in list(models.items()):
-        if model.get('settings') == {'thinking': {'type': 'adaptive', 'display': 'summarized'}, 'effort': 'medium'}:
-            del model['settings']
-        if model in ({}, {'limit': {'context': 470000}}):
-            del models[name]
-    if 'anthropic' in providers and providers['anthropic'] in ({}, {'models': {}}):
-        del providers['anthropic']
+def set_gemini_hooks(config):
+    """Merge this setup's Antigravity hook group into ~/.gemini/config/hooks.json, preserving all other groups (e.g. orca-status)."""
+    py = Path(sys.executable).as_posix()
+    fresh = (HOME / 'hooks' / 'fresh_checkout.py').as_posix()
+    task_daily = (HOME / 'tools' / 'task.py').as_posix()
+    pre_bash = (HOME / 'hooks' / 'pre_bash.py').as_posix()
+    config[GEMINI_HOOK_GROUP] = {
+        'SessionStart': [
+            {'type': 'command', 'command': f'"{py}" "{fresh}"', 'timeout': 60},
+            {'type': 'command', 'command': f'"{py}" "{task_daily}" daily --antigravity', 'timeout': 5},
+        ],
+        'PreToolUse': [
+            {
+                'matcher': 'run_command',
+                'hooks': [
+                    {'type': 'command', 'command': f'"{py}" "{pre_bash}"', 'timeout': 20},
+                ],
+            }
+        ],
+    }
 
 
 def merge(base, extra):
@@ -180,10 +198,9 @@ def label(dst):
         return str(dst)
 
 
-def shared_rules(personal):
-    """CLAUDE.md for agents without @imports: drop import lines, inline personal.md."""
-    rules = [l for l in (REPO / 'CLAUDE.md').read_text(encoding='utf-8').splitlines() if not l.startswith('@')]
-    text = '\n'.join(rules).rstrip() + '\n'
+def antigravity_rules(personal):
+    """Render Antigravity's GEMINI.md with personal.md inlined."""
+    text = (AGY_REPO / 'GEMINI.md').read_text(encoding='utf-8').rstrip() + '\n'
     if personal.exists():
         text += '\n' + personal.read_text(encoding='utf-8').strip() + '\n'
     return text
@@ -230,18 +247,6 @@ class Installer:
         if not self.dry:
             dst.write_text(json.dumps(new, indent=2) + '\n', encoding='utf-8', newline='\n')
 
-    def shared(self, personal):
-        text = shared_rules(personal)
-        for name, dst in SHARED.items():
-            if not dst.parent.is_dir():
-                continue
-            if dst.is_file() and not dst.is_symlink() and dst.read_text(encoding='utf-8') == text:
-                continue
-            self.save(dst, name)
-            print(f'  write   {label(dst)}')
-            if not self.dry:
-                dst.write_text(text, encoding='utf-8', newline='\n')
-
     def retire_harnesses(self):
         for harness, root in RETIRED_HARNESSES.items():
             for rel, digest in RETIRED_FILES[harness].items():
@@ -256,35 +261,42 @@ class Installer:
     def retire_agents(self):
         for name, digest in RETIRED_AGENTS.items():
             harness, filename = name.split('/')
-            dst = (HOME if harness == 'claude' else OPENCODE) / 'agents' / filename
+            base = HOME if harness == 'claude' else GEMINI
+            dst = base / 'agents' / filename
             if dst.is_file() and hashlib.sha256(dst.read_text(encoding='utf-8').encode()).hexdigest() == digest:
                 self.save(dst, harness + '-agents')
                 print(f'  remove  {label(dst)}')
 
     def install_agents(self):
-        targets = [('claude', HOME, HOME / 'agents'), ('opencode', OPENCODE, OPENCODE / 'agents')]
-        for harness, directory, agents in targets:
-            if not directory.is_dir():
-                continue
-            for src in sorted((ROOT / harness / 'agents').glob('*.*')):
-                self.place(src, agents / src.name, harness + '-agents')
+        if HOME.is_dir():
+            for src in sorted((REPO / 'agents').glob('*.*')):
+                self.place(src, HOME / 'agents' / src.name, 'claude-agents')
 
-    def opencode(self):
-        if not OPENCODE.is_dir():
+    def antigravity(self, personal):
+        """Install Antigravity GEMINI.md, merged hooks.json, and shared skills into ~/.gemini/config."""
+        if not GEMINI.is_dir():
             return
-        dst = next((OPENCODE / n for n in ('opencode.jsonc', 'opencode.json') if (OPENCODE / n).is_file()), OPENCODE / 'opencode.jsonc')
-        try:
-            cur = read_json(dst) if dst.is_file() else {}
-        except json.JSONDecodeError:
-            raise ValueError(f'Invalid OpenCode config: {dst}')
-        new = merge(json.loads(json.dumps(cur)), read_json(ROOT / 'opencode' / 'opencode.json'))
-        clean_opencode(new)
-        if new == cur:
-            return
-        self.save(dst, 'opencode')
-        print(f'  merge   {dst}')
-        if not self.dry:
-            dst.write_text(json.dumps(new, indent=2) + '\n', encoding='utf-8', newline='\n')
+        # 1. GEMINI.md (inlines personal.md)
+        rules_dst = GEMINI / 'GEMINI.md'
+        text = antigravity_rules(personal)
+        if not (rules_dst.is_file() and not rules_dst.is_symlink() and rules_dst.read_text(encoding='utf-8') == text):
+            self.save(rules_dst, 'antigravity')
+            print(f'  write   {label(rules_dst)}')
+            if not self.dry:
+                rules_dst.write_text(text, encoding='utf-8', newline='\n')
+        # 2. hooks.json (merge workflow-guards, preserve orca-status and all user groups)
+        hooks_dst = GEMINI / 'hooks.json'
+        cur = read_json(hooks_dst) if hooks_dst.is_file() else {}
+        new = json.loads(json.dumps(cur))
+        set_gemini_hooks(new)
+        if new != cur:
+            self.save(hooks_dst, 'antigravity')
+            print(f'  merge   {label(hooks_dst)}')
+            if not self.dry:
+                hooks_dst.write_text(json.dumps(new, indent=2) + '\n', encoding='utf-8', newline='\n')
+        # 3. Shared skills (preserve Orca's installed skills)
+        for src in sorted((REPO / 'skills').glob('*/SKILL.md')):
+            self.place(src, GEMINI / 'skills' / src.parent.name / 'SKILL.md', f'antigravity-skills/{src.parent.name}')
 
     def run(self):
         print(f'Installing into {HOME}' + (' (dry run)' if self.dry else ''))
@@ -297,8 +309,7 @@ class Installer:
         for name in RETIRED_TOOLS:
             self.save(HOME / 'tools' / name)
         for src in sorted((REPO / 'tools').glob('*.py')):
-            if src.name != 'oc.py' or OPENCODE.is_dir():  # that one hands work to OpenCode
-                self.place(src, HOME / 'tools' / src.name)
+            self.place(src, HOME / 'tools' / src.name)
         for src in sorted((REPO / 'skills').glob('*/SKILL.md')):
             self.place(src, HOME / 'skills' / src.parent.name / 'SKILL.md')
         if not (HOME / 'machine.json').exists():
@@ -312,8 +323,7 @@ class Installer:
             print('  create  personal.md (edit it: your OS, project paths, extra rules)')
             if not self.dry:
                 shutil.copy2(REPO / 'personal.example.md', personal)
-        self.shared(personal if personal.exists() else REPO / 'personal.example.md')
-        self.opencode()
+        self.antigravity(personal if personal.exists() else REPO / 'personal.example.md')
         if self.saved:
             print(f'Backups in {self.backup}')
         print('Done. Start new agent sessions to reload the rules and settings.')

@@ -8,7 +8,7 @@ For the main chat and each agent type it prints:
 - turns: tool calls per turn, turns that only read, and the spend in streaks of turns that made
   one read-only call each, which is what claude/hooks/read_streak.py counts;
 - the median context of a run's first turn (the fixed prompt every turn pays for) and its handoffs
-  to DeepSeek (deepseek.py runs, Orca OpenCode workers).
+  to `worker.py` / `laptop.py` / Orca workers.
 
   python tools/context_fill.py            # last 4 days
   python tools/context_fill.py --days 7
@@ -44,9 +44,9 @@ def size(content):
 
 def scan(path, since):
     """One transcript: its priced turns as (cost, tool calls), result sizes by source, long whole-file reads, shell output by kind,
-    the context of its first turn in tokens, and its DeepSeek handoffs."""
+    the context of its first turn in tokens, and its worker/laptop handoffs."""
     turns, calls, fill, long_reads, shell = {}, {}, collections.Counter(), collections.Counter(), collections.Counter()
-    deepseek = collections.Counter()
+    handoffs = collections.Counter()
     with open(path, encoding='utf-8', errors='ignore') as f:
         for line in f:
             try:
@@ -67,11 +67,11 @@ def scan(path, since):
                         calls[b.get('id')] = call
                         turn[2].append(call)
                         command = str(call['tool_input'].get('command', ''))
-                        tool = next((t for t in ('oc.py', 'deepseek.py') if t in command), None)
+                        tool = next((t for t in ('worker.py', 'laptop.py') if t in command), None)
                         if tool:
-                            deepseek[f'{tool} runs'] += 1
-                        elif 'worker-start' in command and 'opencode' in command:
-                            deepseek['OpenCode workers'] += 1
+                            handoffs[f'{tool} runs'] += 1
+                        elif 'worker-start' in command:
+                            handoffs['Orca workers'] += 1
                         if call['tool_name'] in ('Edit', 'Write', 'NotebookEdit'):
                             fill['edit and write text'] += len(json.dumps(call['tool_input']))
             for b in blocks:
@@ -94,7 +94,7 @@ def scan(path, since):
     priced = [(sum(c.values()), t[2]) for t in turns.values() if t[1] for c in [cr.cost(t[0], t[1])] if c]
     first = next((sum(t[1].get(k, 0) for k in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
                   for t in turns.values() if t[1]), None)
-    return priced, fill, long_reads, shell, first, deepseek
+    return priced, fill, long_reads, shell, first, handoffs
 
 
 def main():
@@ -106,7 +106,7 @@ def main():
     groups = collections.defaultdict(lambda: {'cost': 0.0, 'turns': 0, 'reads': 0.0, 'ncalls': collections.Counter(),
                                               'streak': collections.Counter(), 'fill': collections.Counter(),
                                               'long': collections.Counter(), 'shell': collections.Counter(),
-                                              'first': [], 'deepseek': collections.Counter(), 'runs': 0})
+                                              'first': [], 'handoffs': collections.Counter(), 'runs': 0})
     paths = [(p, 'main chat') for p in glob.glob(os.path.join(a.root, '*', '*.jsonl'))]
     for p in glob.glob(os.path.join(a.root, '*', '*', 'subagents', '*.jsonl')):
         try:
@@ -117,9 +117,9 @@ def main():
     for path, who in paths:
         if os.path.getmtime(path) < since:
             continue
-        priced, fill, long_reads, shell, first, deepseek = scan(path, since)
+        priced, fill, long_reads, shell, first, handoffs = scan(path, since)
         g = groups[who]
-        for key, part in (('fill', fill), ('long', long_reads), ('shell', shell), ('deepseek', deepseek)):
+        for key, part in (('fill', fill), ('long', long_reads), ('shell', shell), ('handoffs', handoffs)):
             g[key].update(part)
         g['runs'] += bool(priced)
         if first:
@@ -156,8 +156,8 @@ def main():
         print('  spend in streaks of single-read turns: '
               + ', '.join(f'{label} turns ${g["streak"][label]:,.0f} ({100 * g["streak"][label] / g["cost"]:.0f}%)' for _, label in STREAKS))
         if g['first']:
-            print(f'  first turn: median {sorted(g["first"])[len(g["first"]) // 2] / 1e3:.0f}k tokens of context; OpenCode handoffs in '
-                  f'{g["runs"]} runs: ' + (', '.join(f'{n} {k}' for k, n in g['deepseek'].most_common()) or 'none'))
+            print(f'  first turn: median {sorted(g["first"])[len(g["first"]) // 2] / 1e3:.0f}k tokens of context; handoffs in '
+                  f'{g["runs"]} runs: ' + (', '.join(f'{n} {k}' for k, n in g['handoffs'].most_common()) or 'none'))
 
 
 if __name__ == '__main__':

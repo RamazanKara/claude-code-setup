@@ -100,8 +100,8 @@ def local(path):
 
 def gate(top, sha, skip, agent=None):
     """None when the push may go, else why it is held."""
-    if os.environ.get('CLAUDECODE') != '1':
-        say('review gate not asked: outside Claude Code there is no reviewer agent to satisfy it')
+    if os.environ.get('CLAUDECODE') != '1' and os.environ.get('ANTIGRAVITY_AGENT') != '1':
+        say('review gate not asked: outside Claude Code or Antigravity there is no reviewer agent to satisfy it')
         return None
     if not os.path.isfile(GATE):
         return f'the review gate is missing ({GATE}), so nothing can judge this push; reinstall claude-code-setup'

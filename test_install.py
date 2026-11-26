@@ -5,8 +5,9 @@ import hashlib
 import importlib.util
 import io
 import json
-import shutil
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,15 +18,18 @@ from unittest.mock import patch
 
 import install
 
-# No test may reach the real ~/.codex or ~/.gemini: a test that forgets to patch them retires nothing.
+# No test may reach the real ~/.codex or ~/.gemini: a test that forgets to patch them touches nothing.
 _no_real_harnesses = patch.object(install, 'RETIRED_HARNESSES', {})
+_no_real_gemini = patch.object(install, 'GEMINI', Path(tempfile.gettempdir()) / 'no-such-gemini-test-dir')
 
 
 def setUpModule():
     _no_real_harnesses.start()
+    _no_real_gemini.start()
 
 
 def tearDownModule():
+    _no_real_gemini.stop()
     _no_real_harnesses.stop()
 
 
@@ -61,17 +65,18 @@ class InstallerTests(unittest.TestCase):
         install.clean_claude(config)  # only the tools we hide stay denied
         self.assertEqual(config, {'permissions': {'deny': ['ScheduleWakeup']}})
 
-    def test_opencode_preserves_custom_agent_properties(self):
-        config = {'agents': {'explore': {'model': 'opencode-go/deepseek-v4.1-flash', 'custom': True},
-                             'general': {'disabled': True, 'description': 'mine'},
-                             'custom': {'model': 'user/model'}},
-                  'permissions': [{'effect': 'deny', 'action': 'shell'},
-                                  {'effect': 'allow', 'action': 'read'}]}
-        install.clean_opencode(config)
-        self.assertEqual(config['agents'], {'explore': {'custom': True},
-                                           'general': {'description': 'mine'},
-                                           'custom': {'model': 'user/model'}})
-        self.assertEqual(config['permissions'], [{'effect': 'allow', 'action': 'read'}])
+    def test_gemini_hooks_preserve_orca_and_user_groups(self):
+        config = {'orca-status': {'PreToolUse': [{'matcher': '*', 'hooks': [{'type': 'command', 'command': 'orca.cmd'}]}]},
+                  'custom-user': {'Stop': [{'type': 'command', 'command': 'echo done'}]}}
+        install.set_gemini_hooks(config)
+        self.assertIn('orca-status', config)
+        self.assertIn('custom-user', config)
+        wf = config[install.GEMINI_HOOK_GROUP]
+        self.assertEqual(len(wf['SessionStart']), 2)
+        self.assertIn('fresh_checkout.py', wf['SessionStart'][0]['command'])
+        self.assertIn('task.py" daily --antigravity', wf['SessionStart'][1]['command'])
+        self.assertEqual(wf['PreToolUse'][0]['matcher'], 'run_command')
+        self.assertIn('pre_bash.py', wf['PreToolUse'][0]['hooks'][0]['command'])
 
     def test_a_users_hook_that_shares_a_group_with_ours_is_kept(self):
         config = {'hooks': {'PreToolUse': [{'matcher': 'Bash|PowerShell', 'hooks': [
@@ -79,48 +84,51 @@ class InstallerTests(unittest.TestCase):
         install.set_hooks(config)
         groups = config['hooks']['PreToolUse']
         self.assertEqual([[hook['command'] for hook in group['hooks']] for group in groups][0], ['mine'])
-        self.assertEqual((len(groups), groups[1]['hooks'][0]['args'][1]), (3, 'push'))
+        self.assertEqual(len(groups), 2)
+        self.assertTrue(groups[1]['hooks'][0]['args'][0].endswith('pre_bash.py'))
 
     def test_install_migration_backups_dry_run_and_idempotency(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             root = Path(tmp)
-            home, opencode = root / 'claude', root / 'opencode'
+            home, gemini = root / 'claude', root / 'gemini' / 'config'
             home.mkdir()
-            opencode.mkdir()
-            shared = {'other': root / 'other' / 'AGENTS.md'}
-            shared['other'].parent.mkdir()
-            retired_roots = {'codex': root / 'codex', 'antigravity': root / 'antigravity'}
+            (gemini / 'skills' / 'orca-cli').mkdir(parents=True)
+            (gemini / 'skills' / 'orca-cli' / 'SKILL.md').write_text('orca skill\n', encoding='utf-8')
+            (gemini / 'GEMINI.md').write_text('# Old notes\n', encoding='utf-8')
+            (gemini / 'hooks.json').write_text(json.dumps({
+                'orca-status': {'Stop': [{'type': 'command', 'command': 'orca-stop.cmd', 'timeout': 10}]}
+            }), encoding='utf-8')
+            retired_roots = {'codex': root / 'codex'}
             (root / 'codex' / 'agents').mkdir(parents=True)
             (root / 'codex' / 'AGENTS.md').write_text('# Working rules\nold\n', encoding='utf-8')
             (root / 'codex' / 'agents' / 'scout.toml').write_text('shipped\n', encoding='utf-8')
             (root / 'codex' / 'agents' / 'mine.toml').write_text('own\n', encoding='utf-8')
-            (root / 'antigravity').mkdir()
-            (root / 'antigravity' / 'GEMINI.md').write_text('# My own notes\n', encoding='utf-8')
-            retired_files = {'codex': {'AGENTS.md': 'rules', 'agents/scout.toml': hashlib.sha256(b'shipped\n').hexdigest()},
-                             'antigravity': {'GEMINI.md': 'rules'}}
+            retired_files = {'codex': {'AGENTS.md': 'rules', 'agents/scout.toml': hashlib.sha256(b'shipped\n').hexdigest()}}
             other = {'hooks': [{'type': 'command', 'command': 'other-hook'}]}
+            orca_pre = {'matcher': '*', 'hooks': [{'type': 'command', 'command': 'C:/x/orca-agent-hook.exe claude', 'timeout': 10}]}
+            orca_post = {'matcher': '*', 'hooks': [{'type': 'command', 'command': 'C:/x/orca-agent-hook.exe claude', 'timeout': 10}]}
             stale = {'hooks': [{'type': 'command', 'command': 'old-python', 'args': ['old/read_streak.py']}]}
             guard = {'hooks': [{'type': 'command', 'command': 'old-python', 'args': ['old/advisor_guard.py']}]}
-            original = {'hooks': {'Stop': ['keep'], 'PostToolBatch': [stale, other], 'SubagentStart': [guard]}, 'env': {'KEEP': '1'},
+            original = {'hooks': {'Stop': ['keep'], 'PreToolUse': [orca_pre], 'PostToolUse': [orca_post],
+                                  'PostToolBatch': [stale, other], 'SubagentStart': [guard]},
+                        'env': {'KEEP': '1', 'CLAUDE_CODE_SUBAGENT_MODEL': 'opus'},
                         'advisorModel': 'fable',
                         'permissions': {'deny': ['blocked'], 'allow': ['Read']},
                         'skillOverrides': {'docs': 'off', 'custom': 'on'}}
             (home / 'settings.json').write_text(json.dumps(original), encoding='utf-8')
             (home / 'settings.local.json').write_text('{"permissions":{"deny":["local"]}}', encoding='utf-8')
-            (opencode / 'opencode.jsonc').write_text(
-                '// legacy\n{"agents":{"general":{"disabled":true}},'
-                '"permissions":[{"effect":"deny","action":"shell"}],'
-                '"providers":{"anthropic":{"models":{"claude-opus-5-5":{"limit":{"context":470000}}}}},}',
-                encoding='utf-8')
             agents = home / 'agents'
             agents.mkdir()
             (agents / 'old.md').write_text('retired\n', encoding='utf-8')
             (agents / 'custom.md').write_text('user replacement\n', encoding='utf-8')
+            (gemini / 'agents').mkdir(parents=True)
+            (gemini / 'agents' / 'legacy.md').write_text('retired\n', encoding='utf-8')
             (home / 'tools').mkdir()
             (home / 'tools' / 'deepseek.py').write_text('old\n', encoding='utf-8')
-            retired = dict.fromkeys(('claude/old.md', 'claude/custom.md'),
+            (home / 'tools' / 'oc.py').write_text('old\n', encoding='utf-8')
+            retired = dict.fromkeys(('claude/old.md', 'claude/custom.md', 'antigravity/legacy.md'),
                                     hashlib.sha256(b'retired\n').hexdigest())
-            with patch.multiple(install, HOME=home, OPENCODE=opencode, SHARED=shared, RETIRED_AGENTS=retired,
+            with patch.multiple(install, HOME=home, GEMINI=gemini, RETIRED_AGENTS=retired,
                                 RETIRED_HARNESSES=retired_roots, RETIRED_FILES=retired_files):
                 dry = install.Installer(True)
                 dry.run()
@@ -129,7 +137,8 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((home / 'CLAUDE.md').exists())
                 self.assertFalse((agents / 'scout.md').exists())
                 self.assertFalse((home / 'hooks').exists())
-                self.assertEqual([f.name for f in (home / 'tools').iterdir()], ['deepseek.py'])  # a dry run moves nothing
+                self.assertEqual(sorted(f.name for f in (home / 'tools').iterdir()), ['deepseek.py', 'oc.py'])
+                self.assertEqual((gemini / 'GEMINI.md').read_text(encoding='utf-8'), '# Old notes\n')
                 first = install.Installer(False)
                 first.run()
                 settings = install.read_json(home / 'settings.json')
@@ -140,77 +149,75 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(batch[0], other)
                 self.assertEqual([g['hooks'][0]['args'] for g in batch[1:]], [[script.as_posix()]])
                 self.assertEqual(settings['env'], {'KEEP': '1', **install.read_json(install.REPO / 'settings.json')['env']})
-                self.assertEqual(settings['env']['CLAUDE_CODE_SUBAGENT_MODEL'], 'opus')
+                self.assertNotIn('CLAUDE_CODE_SUBAGENT_MODEL', settings['env'])
                 self.assertIs(settings['disableClaudeAiConnectors'], True)
-                self.assertEqual(settings['skillOverrides']['code-review'], 'off')  # the reviewer agent does it; ReportFindings is denied
-                self.assertEqual(settings['skillOverrides']['anthropic-skills:docs'], 'off')  # not the legacy 'docs' key the cleanup drops
-                self.assertNotIn('advisorModel', settings)  # removed on 2026-11-20
-                self.assertIs(settings['autoMemoryEnabled'], False)  # memory off since 2026-11-20; lasting facts go in rules
+                self.assertEqual(settings['skillOverrides']['code-review'], 'off')
+                self.assertEqual(settings['skillOverrides']['anthropic-skills:docs'], 'off')
+                self.assertNotIn('advisorModel', settings)
+                self.assertIs(settings['autoMemoryEnabled'], False)
                 gate = (home / 'hooks' / 'review_gate.py').as_posix()
-                self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['PreToolUse']],
-                                 [('Bash|PowerShell', [gate, 'push']), ('Bash|PowerShell', [(home / 'hooks' / 'cargo_pool.py').as_posix()])])
+                pre_bash = (home / 'hooks' / 'pre_bash.py').as_posix()
+                self.assertNotIn('async', settings['hooks']['PreToolUse'][0]['hooks'][0])  # Orca PreToolUse stays sync
+                self.assertIs(settings['hooks']['PostToolUse'][0]['hooks'][0].get('async'), True)  # Orca PostToolUse becomes async
+                self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['PreToolUse'][1:]],
+                                 [('Bash|PowerShell', [pre_bash])])
                 self.assertEqual([(g['matcher'], g['hooks'][0]['args']) for g in settings['hooks']['SubagentStop']],
-                                 [('reviewer', [gate, 'reviewed'])])
-                self.assertNotIn('SubagentStart', settings['hooks'])  # the retired advisor guard's entry is gone
-                self.assertTrue((agents / 'reviewer.md').exists())
+                                 [('reviewer|wave-reviewer', [gate, 'reviewed'])])
+                self.assertNotIn('SubagentStart', settings['hooks'])
+                for name in ('scout.md', 'coder.md', 'reviewer.md'):
+                    self.assertEqual((agents / name).read_bytes(), (install.REPO / 'agents' / name).read_bytes())
                 for name in ('issue-batch', 'merge-train', 'public-copy'):
                     skill = home / 'skills' / name / 'SKILL.md'
                     self.assertEqual(skill.read_bytes(), (install.REPO / 'skills' / name / 'SKILL.md').read_bytes())
-                self.assertFalse((home / 'tools' / 'deepseek.py').exists())  # retired for oc.py
-                self.assertTrue((first.backup / 'tools' / 'deepseek.py').exists())
-                for tool in ('oc.py', 'memory_sync.py', 'task.py'):
+                    gskill = gemini / 'skills' / name / 'SKILL.md'
+                    self.assertEqual(gskill.read_bytes(), (install.REPO / 'skills' / name / 'SKILL.md').read_bytes())
+                self.assertEqual((gemini / 'skills' / 'orca-cli' / 'SKILL.md').read_text(encoding='utf-8'), 'orca skill\n')
+                for gone in ('deepseek.py', 'oc.py'):
+                    self.assertFalse((home / 'tools' / gone).exists())
+                    self.assertTrue((first.backup / 'tools' / gone).exists())
+                for tool in ('worker.py', 'laptop.py', 'land.py', 'memory_sync.py', 'task.py', 'update_harnesses.py'):
                     self.assertEqual((home / 'tools' / tool).read_bytes(), (install.REPO / 'tools' / tool).read_bytes())
                 self.assertEqual([g['hooks'][0]['args'] for g in settings['hooks']['SessionStart']],
-                                 [[(home / 'hooks' / 'fresh_checkout.py').as_posix()]])  # task.py daily retired 2026-11-20
+                                 [[(home / 'hooks' / 'fresh_checkout.py').as_posix()],
+                                  [(home / 'tools' / 'task.py').as_posix(), 'daily']])
                 self.assertEqual(install.read_json(home / 'machine.json'), install.read_json(install.REPO / 'machine.example.json'))
                 self.assertEqual(settings['permissions'], {'allow': ['Read'], 'deny': ['ScheduleWakeup', 'ReportFindings']})
                 ours = install.read_json(install.REPO / 'settings.json')['skillOverrides']
-                self.assertEqual(settings['skillOverrides'], {'custom': 'on', **ours})  # the legacy 'docs' key is gone
+                self.assertEqual(settings['skillOverrides'], {'custom': 'on', **ours})
                 self.assertNotIn('docs', settings['skillOverrides'])
                 self.assertEqual(install.read_json(first.backup / 'settings.json'), original)
                 self.assertFalse((agents / 'old.md').exists())
                 self.assertTrue((first.backup / 'claude-agents/old.md').exists())
                 self.assertTrue((agents / 'custom.md').exists())
-                for name in ('scout', 'runner', 'mechanic'):
-                    self.assertFalse((agents / (name + '.md')).exists())  # retired on 2026-11-20 for oc.py
-                for name in ('scout', 'runner', 'mechanic', 'coder', 'reviewer'):
-                    dst = opencode / 'agents' / (name + '.md')
-                    self.assertEqual(dst.read_bytes(), (install.ROOT / 'opencode' / 'agents' / dst.name).read_bytes())
-                # Codex and Antigravity: this setup's rules and agents go, the user's own files stay
+                self.assertFalse((gemini / 'agents' / 'legacy.md').exists())
+                # Antigravity GEMINI.md and hooks.json installed cleanly while preserving orca-status
+                self.assertEqual((gemini / 'GEMINI.md').read_text(encoding='utf-8'),
+                                 install.antigravity_rules(home / 'personal.md'))
+                ghooks = install.read_json(gemini / 'hooks.json')
+                self.assertEqual(ghooks['orca-status']['Stop'][0]['command'], 'orca-stop.cmd')
+                self.assertIn(install.GEMINI_HOOK_GROUP, ghooks)
+                self.assertEqual(ghooks[install.GEMINI_HOOK_GROUP]['PreToolUse'][0]['matcher'], 'run_command')
+                # Codex retired cleanly while preserving user's own file
                 self.assertFalse((root / 'codex' / 'AGENTS.md').exists())
                 self.assertFalse((root / 'codex' / 'agents' / 'scout.toml').exists())
                 self.assertTrue((first.backup / 'codex' / 'scout.toml').exists())
                 self.assertTrue((root / 'codex' / 'agents' / 'mine.toml').exists())
-                self.assertEqual((root / 'antigravity' / 'GEMINI.md').read_text(encoding='utf-8'), '# My own notes\n')
-                self.assertFalse((root / 'other' / 'agents').exists())
                 self.assertEqual(install.read_json(home / 'settings.local.json'), {})
-                self.assertNotIn('agents', install.read_json(opencode / 'opencode.jsonc'))
-                self.assertNotIn('permissions', install.read_json(opencode / 'opencode.jsonc'))
-                config = install.read_json(opencode / 'opencode.jsonc')
-                flash = config['providers']['opencode-go']['models']
-                self.assertEqual(flash['glm-5.3']['body'], {'reasoning_effort': 'max'})
-                self.assertEqual(flash['deepseek-v4.1-flash']['body'], {'reasoning_effort': 'max'})
-                # Claude only through Claude Code; never DeepSeek Pro
-                self.assertNotIn('anthropic', config['providers'])
-                denied = {p['resource'] for p in config['policies'] if p['action'] == 'provider.use' and p['effect'] == 'deny'}
-                self.assertEqual(denied, {'anthropic', 'opencode'})
-                self.assertTrue(flash['deepseek-v4-pro']['disabled'])
-                self.assertEqual(next(iter(shared.values())).read_text(encoding='utf-8'),
-                                 install.shared_rules(home / 'personal.md'))
                 second = install.Installer(False)
                 second.run()
                 self.assertFalse(second.saved)
                 self.assertFalse(second.backup.exists())
 
-    def test_the_opencode_tool_needs_opencode(self):
+    def test_install_skips_antigravity_when_config_dir_is_absent(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             home = Path(tmp) / 'claude'
             home.mkdir()
-            with patch.multiple(install, HOME=home, OPENCODE=Path(tmp) / 'none', SHARED={}, RETIRED_AGENTS={},
-                                RETIRED_HARNESSES={}):
+            absent_gemini = Path(tmp) / 'no-gemini' / 'config'
+            with patch.multiple(install, HOME=home, GEMINI=absent_gemini, RETIRED_AGENTS={}, RETIRED_HARNESSES={}):
                 install.Installer(False).run()
-            self.assertTrue((home / 'hooks' / 'read_streak.py').exists())
-            self.assertEqual(sorted(tool.name for tool in (home / 'tools').iterdir()), ['land.py', 'memory_sync.py', 'task.py', 'update_harnesses.py'])
+            self.assertFalse(absent_gemini.exists())
+            self.assertTrue((home / 'tools' / 'worker.py').exists())
+            self.assertTrue((home / 'tools' / 'laptop.py').exists())
 
 
 class ReadStreakHookTests(unittest.TestCase):
@@ -231,7 +238,8 @@ class ReadStreakHookTests(unittest.TestCase):
         notes = [self.turn(('Read', '')) for _ in range(9)]
         self.assertEqual([i + 1 for i, note in enumerate(notes) if note], [3, 9])
         self.assertIn('3 read-only turns', notes[2])
-        self.assertIn('oc.py" read', notes[2])
+        self.assertIn('scout', notes[2])
+        self.assertIn('worker.py" read', notes[2])
 
     def test_a_batched_or_acting_turn_resets_the_streak(self):
         resets = ((('Read', ''), ('Grep', '')), (('Edit', ''),), (('PowerShell', 'cargo test | tail -5'),))
@@ -261,8 +269,10 @@ class ReadStreakHookTests(unittest.TestCase):
             self.assertIsNone(self.turn(('Read', ''), agent_id='a1', agent_type='general-purpose'))
         for _ in range(4):
             self.assertIsNone(self.turn(('Read', ''), agent_id='a2', agent_type='scout'))
+            self.assertIsNone(self.turn(('Read', ''), agent_id='a3', agent_type='fast-scout'))
+            self.assertIsNone(self.turn(('Read', ''), agent_id='a4', agent_type='wave-reviewer'))
         note = self.turn(('Read', ''), agent_id='a1', agent_type='general-purpose')
-        self.assertIn('/tools/oc.py" read', note)
+        self.assertIn('/tools/worker.py" read', note)
 
     def test_zero_turns_it_off_and_bad_input_stays_silent(self):
         self.env['CLAUDE_READ_STREAK'] = '0'
@@ -433,6 +443,19 @@ class FreshCheckoutTests(unittest.TestCase):
         self.assertEqual(len(entry), 1)
         self.assertEqual(entry[0]['hooks'][0]['timeout'], 60)
 
+    def test_antigravity_session_start_payload_emits_inject_steps_or_empty_json(self):
+        ag_event = {'conversationId': 'cid-1', 'workspacePaths': [str(self.repo)], 'hookEventName': 'SessionStart'}
+        done = subprocess.run([sys.executable, str(self.HOOK)], input=json.dumps(ag_event),
+                              capture_output=True, text=True, env=self.env)
+        self.assertEqual((done.returncode, done.stderr), (0, ''))
+        self.assertEqual(json.loads(done.stdout), {})
+        self.land('AGENTS.md', 'antigravity rule\n')
+        done2 = subprocess.run([sys.executable, str(self.HOOK)], input=json.dumps(ag_event),
+                               capture_output=True, text=True, env=self.env)
+        self.assertEqual((done2.returncode, done2.stderr), (0, ''))
+        out = json.loads(done2.stdout)
+        self.assertIn('fast-forwarded', out['injectSteps'][0]['systemMessage']['systemMessage'])
+
 
 class LandToolTests(unittest.TestCase):
     TOOL = install.REPO / 'tools' / 'land.py'
@@ -551,7 +574,12 @@ class LandToolTests(unittest.TestCase):
         code, out = self.land(tool=lone / 'land.py')
         self.assertEqual(code, 4, out)
         self.assertIn('review gate is missing', out)
-        code, out = self.land(env={'CLAUDECODE': ''})
+        # Antigravity also activates the review gate
+        code_ag, out_ag = self.land(env={'CLAUDECODE': '', 'ANTIGRAVITY_AGENT': '1'})
+        self.assertEqual(code_ag, 4, out_ag)
+        self.assertIn('held by the review gate', out_ag)
+        # Outside both harnesses, the gate is not asked
+        code, out = self.land(env={'CLAUDECODE': '', 'ANTIGRAVITY_AGENT': ''})
         self.assertEqual(code, 0, out)
         self.assertIn('review gate not asked', out)
 
@@ -670,22 +698,23 @@ class ReviewGateTests(unittest.TestCase):
     def push(self, command='git push origin HEAD:main', **event):
         return self.hook('push', tool_name='PowerShell', tool_input={'command': command}, **event)
 
-    def test_a_finished_oc_review_counts_like_the_reviewer_agent(self):
+    def test_a_finished_worker_review_from_either_harness_counts(self):
         bin = self.root / 'bin'
         bin.mkdir()
         fake_bin(bin)
         self.write('b.rs', 200)
         self.commit('big')
         self.assertIn('Push held back', self.push())
-        env = {**self.env, 'PATH': str(bin) + os.pathsep + os.environ['PATH'], 'OC_MODEL': 'deepseek'}
-        failed = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), 'review', '--dir', str(self.repo),
-                                 'fail'], capture_output=True, text=True, env=env)
+        env = {**self.env, 'PATH': str(bin) + os.pathsep + os.environ['PATH'], 'CLAUDECODE': '1', 'ANTIGRAVITY_AGENT': ''}
+        failed = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'worker.py'), 'review', '--harness', 'agy',
+                                 '--dir', str(self.repo), 'fail'], capture_output=True, text=True, env=env)
         self.assertEqual(failed.returncode, 1)
-        self.assertIn('Push held back', self.push())  # a review that failed unlocks nothing
-        done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), 'review', '--dir', str(self.repo),
-                               'the request'], capture_output=True, text=True, env=env)
+        self.assertIn('Push held back', self.push())  # a failed review unlocks nothing
+        # Opt-in cross-harness Antigravity Carbon review unlocks push gate!
+        done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'worker.py'), 'review', '--harness', 'agy',
+                               '--dir', str(self.repo), 'the request'], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('run -m opencode-go/deepseek-v4.1-flash#max', done.stdout)
+        self.assertIn('gemini-4-carbon-high', done.stdout)
         self.assertIsNone(self.push())
 
     def decisions(self):
@@ -710,7 +739,7 @@ class ReviewGateTests(unittest.TestCase):
         self.commit('large')
         held = self.push()
         self.assertIn('300 changed code lines in 1 files', held)
-        self.assertIn('oc.py review --dir', held)
+        self.assertIn('worker.py review --dir', held)
         self.assertIn('# REVIEW_SKIP=<reason>', held)
         self.assertIn('report this to the agent that sent you', self.push(agent_type='runner'))
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message='Clean.\nReviewed: ' + str(self.repo)))
@@ -777,12 +806,12 @@ class ReviewGateTests(unittest.TestCase):
         held = self.push(one)
         self.assertIn('299 changed code lines in 2 files', held)
         self.assertIn('push in a command of its own', held)
-        self.assertIn('oc.py review --dir', held)
+        self.assertIn('worker.py review --dir', held)
         self.assertIn('the working tree against', held)
         helper = self.push(one, agent_type='runner')
         self.assertIn('push in a command of its own', helper)
         self.assertIn('report this to the agent that sent you', helper)
-        self.assertNotIn('oc.py review', helper)
+        self.assertNotIn('worker.py review', helper)
         self.assertIsNone(self.push())  # nothing is committed, so a bare push carries nothing
         self.assertIsNone(self.hook('reviewed', agent_type='reviewer', last_assistant_message=f'Reviewed: {self.repo}'))
         self.write('b.rs', 120)
@@ -897,6 +926,13 @@ class ReviewGateTests(unittest.TestCase):
             else:
                 self.assertIsNone(self.push(command), command)
 
+    def test_wave_reviewer_also_unlocks_the_push_gate(self):
+        self.write('b.rs', 250)
+        self.commit('wave-0')
+        self.assertIn('Push held back', self.push())
+        self.assertIsNone(self.hook('reviewed', agent_type='wave-reviewer', last_assistant_message=f'Reviewed: {self.repo}'))
+        self.assertIsNone(self.push())
+
     def test_a_skip_is_logged_and_zero_turns_the_gate_off(self):
         self.write('b.rs', 300)
         self.commit('large')
@@ -975,10 +1011,43 @@ class CargoPoolHookTests(unittest.TestCase):
         done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'cargo_pool.py')], input='not json', capture_output=True, text=True)
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, '', ''))
 
+    def test_gradle_lane_firewall_and_combined_pre_bash_dispatcher(self):
+        (self.pool / 'tools' / 'build_lock.py').write_text('', encoding='utf-8')
+        for bad in (r'client\gradlew.bat -p client :app:testNonRootDebugUnitTest',
+                    r'python tools/build_lock.py --lane gradle -- cmd /c client\gradlew.bat -p client assembleNonRootDebug',
+                    'python -m http.server 8000',
+                    'npx vite --host',
+                    'npm run dev -- --host 0.0.0.0'):
+            said = self.hook(bad)
+            self.assertEqual(said and said['permissionDecision'], 'deny', bad)
+        for ok in (r'python tools/build_lock.py --lane gradle --label nj -- cmd /c client\gradlew.bat -p client --no-daemon assembleNonRootDebug',
+                   'python -m http.server 8000 --bind 127.0.0.1',
+                   'npx vite preview --host 127.0.0.1',
+                   'python -m http.server 8000  # POOL_SKIP=lan test'):
+            self.assertIsNone(self.hook(ok), ok)
+        # Combined pre_bash.py catches cargo_pool violations in one process (Claude Code format).
+        done = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'pre_bash.py')], capture_output=True, text=True,
+                              input=json.dumps({'cwd': str(self.pool), 'tool_input': {'command': 'cargo test -p x'}}))
+        self.assertEqual((done.returncode, done.stderr), (0, ''))
+        self.assertEqual(json.loads(done.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+        # Antigravity camelCase PreToolUse returns explicit {"decision": "deny"|"allow"}.
+        ag_deny = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'pre_bash.py')], capture_output=True, text=True,
+                                 input=json.dumps({'hookEventName': 'PreToolUse', 'cwd': str(self.pool),
+                                                   'toolCall': {'name': 'run_command', 'args': {'CommandLine': 'cargo test -p x'}}}))
+        self.assertEqual((ag_deny.returncode, ag_deny.stderr), (0, ''))
+        out_deny = json.loads(ag_deny.stdout)
+        self.assertEqual(out_deny['decision'], 'deny')
+        self.assertIn('python tools/dev.py cargo -- <args>', out_deny['reason'])
+        ag_allow = subprocess.run([sys.executable, str(install.REPO / 'hooks' / 'pre_bash.py')], capture_output=True, text=True,
+                                  input=json.dumps({'hookEventName': 'PreToolUse', 'cwd': str(self.pool),
+                                                    'toolCall': {'name': 'run_command', 'args': {'CommandLine': 'python tools/dev.py cargo -- test -p x'}}}))
+        self.assertEqual((ag_allow.returncode, ag_allow.stderr), (0, ''))
+        self.assertEqual(json.loads(ag_allow.stdout), {'decision': 'allow'})
+
     def test_installer_registers_it_for_both_shells(self):
         config = {}
         install.set_hooks(config)
-        entry = [g for g in config['hooks']['PreToolUse'] if 'cargo_pool.py' in json.dumps(g)]
+        entry = [g for g in config['hooks']['PreToolUse'] if 'pre_bash.py' in json.dumps(g)]
         self.assertEqual([g['matcher'] for g in entry], ['Bash|PowerShell'])
 
 
@@ -999,43 +1068,50 @@ class CostReportTests(unittest.TestCase):
         self.assertIn('main chat on opus 1', out)
 
 
-FAKE_OPENCODE = '''
-import json, os, sys, time
-brief = sys.stdin.read().strip()
-def say(kind, **part):
-    print(json.dumps({'type': kind, 'part': part}), flush=True)
-last = brief.splitlines()[-1] if brief else ''
+FAKE_AGY = '''
+import os, sys, time
+args = sys.argv[1:]
+prompt = args[args.index('--print') + 1] if '--print' in args else ''
+if prompt.startswith('Read and follow every instruction in "'):
+    p = prompt.split('"', 2)[1]
+    prompt = open(p, encoding='utf-8').read()
+last = prompt.strip().splitlines()[-1] if prompt.strip() else ''
 if last == 'say nothing':
     sys.exit(0)
-say('step_start')
-say('text', text='looking')
-say('tool_use', tool='read')
-model = sys.argv[3] if len(sys.argv) > 3 else ''
-if last in ('fail', 'all out'):
-    print(json.dumps({'type': 'error', 'error': {'message': 'quota reached'}}), flush=True)
-    sys.exit(0)
-say('step_start')
-say('text', text='report: ' + brief.splitlines()[0][:24] + ' | ' + ' '.join(sys.argv[1:4]) + ' | ' + brief.splitlines()[-1]
-    + (' | agent ' + sys.argv[sys.argv.index('--agent') + 1] if '--agent' in sys.argv else ''))
-if 'Reviewed:' in brief:  # a review follows the reviewer's instructions to the end
-    say('text', text='\\nReviewed: ' + os.getcwd())
+if last == 'fail':
+    print('agy quota error', file=sys.stderr)
+    sys.exit(1)
+model = args[args.index('--model') + 1] if '--model' in args else ''
+effort = args[args.index('--effort') + 1] if '--effort' in args else ''
+mode = args[args.index('--mode') + 1] if '--mode' in args else ''
+no_slash = ' | no-slash' if '--disable-slash-commands' in args else ''
+print(f'agy report: {model} {effort} mode={mode}{no_slash} | {last}', flush=True)
+if 'Reviewed:' in prompt:
+    print('Reviewed: ' + os.getcwd(), flush=True)
 if last == 'sleep':
     time.sleep(60)
 '''
 
 FAKE_CLAUDE = '''
-import sys
+import os, sys, time
 brief = sys.stdin.read().strip()
 last = brief.splitlines()[-1] if brief else ''
-if last in ('fail', 'say nothing'):
+if last == 'say nothing':
+    sys.exit(0)
+if last == 'fail':
+    print('claude error', file=sys.stderr)
     sys.exit(1)
-print('claude report: ' + ' '.join(sys.argv[1:4]) + ' | ' + last)
+print('claude report: ' + ' '.join(sys.argv[1:6]) + (' | ro' if '--disallowedTools' in sys.argv else '') + ' | ' + last, flush=True)
+if 'Reviewed:' in brief:
+    print('Reviewed: ' + os.getcwd(), flush=True)
+if last == 'sleep':
+    time.sleep(60)
 '''
 
 
 def fake_bin(folder):
-    """opencode and claude stand-ins in `folder`, each behind a shim with a child process, as npm installs them."""
-    for name, source in (('opencode', FAKE_OPENCODE), ('claude', FAKE_CLAUDE)):
+    """agy and claude stand-ins in `folder`, each behind a shim with a child process."""
+    for name, source in (('agy', FAKE_AGY), ('claude', FAKE_CLAUDE)):
         script = folder / (name + '.py')
         script.write_text(source, encoding='utf-8')
         if os.name == 'nt':
@@ -1046,93 +1122,108 @@ def fake_bin(folder):
             shim.chmod(0o755)
 
 
-class OpenCodeToolTests(unittest.TestCase):
+class WorkerToolTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.bin = Path(tmp.name)
         fake_bin(self.bin)
-        self.env = {**os.environ, 'PATH': str(self.bin)}
-        self.env['OC_MODEL'] = 'deepseek'  # these tests cover the DeepSeek path; Claude is the default
+        self.env = {**os.environ, 'PATH': str(self.bin), 'CLAUDECODE': '1', 'ANTIGRAVITY_AGENT': '',
+                    'CLAUDE_REVIEW_LOG': str(self.bin / 'gate.log')}
 
-    def tool(self, *args, **kw):
-        return subprocess.run([sys.executable, str(install.REPO / 'tools' / 'oc.py'), *args],
-                              capture_output=True, text=True, env=self.env, **kw)
+    def tool(self, *args, env=None, **kw):
+        return subprocess.run([sys.executable, str(install.REPO / 'tools' / 'worker.py'), *args],
+                              capture_output=True, text=True, env={**self.env, **(env or {})}, **kw)
 
-    def test_prints_only_the_last_report_and_sends_the_mode_and_model(self):
-        done = self.tool('read', 'find the thing')
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.strip(),
-                         'report: This is a read-only task | run -m opencode-go/deepseek-v4.1-flash#low | find the thing | agent plan')
+    def test_auto_harness_stays_native_and_cross_harness_is_opt_in(self):
+        # Inside Claude Code -> defaults to claude
+        c_read = self.tool('read', 'find x')
+        self.assertEqual(c_read.returncode, 0, c_read.stderr)
+        self.assertEqual(c_read.stdout.strip(), 'claude report: -p --model haiku --effort low | ro | find x')
+        c_code = self.tool('code', 'fix y')
+        self.assertEqual(c_code.stdout.strip(), 'claude report: -p --model sonnet --effort high | fix y')
+        # Opt-in cross-harness to Antigravity from Claude Code
+        a_rev = self.tool('review', '--harness', 'agy', 'check z')
+        self.assertEqual(a_rev.returncode, 0, a_rev.stderr)
+        self.assertIn('agy report: gemini-4-carbon-high high mode=plan | check z', a_rev.stdout)
+        self.assertNotIn('no-slash', a_rev.stdout)  # --disable-slash-commands must never pair with --mode plan
+        # Inside Antigravity -> defaults to agy; opt-in --harness claude runs Opus xhigh
+        ag_env = {'CLAUDECODE': '', 'ANTIGRAVITY_AGENT': '1'}
+        a_read = self.tool('read', 'survey', env=ag_env)
+        self.assertEqual(a_read.stdout.strip(), 'agy report: gemini-4-hydrogen-low low mode=plan | survey')
+        a_code = self.tool('code', 'implement', env=ag_env)
+        self.assertEqual(a_code.stdout.strip(), 'agy report: gemini-4-neon-xhigh xhigh mode=auto | implement')
+        c_opt = self.tool('review', '--harness', 'claude', '--effort', 'xhigh', 'second opinion', env=ag_env)
+        self.assertIn('claude report: -p --model opus --effort xhigh | ro | second opinion', c_opt.stdout)
+
+    def test_stdin_brief_timeout_and_error_cases(self):
         done = self.tool('write', '-', input='make "a b" & c\n')
-        self.assertEqual(done.stdout.strip(),
-                         'report: This is a scaffolding ta | run -m opencode-go/deepseek-v4.1-flash#high | make "a b" & c')
-
-    def test_each_mode_sets_deepseeks_effort_and_a_model_id_passes_through(self):
-        done = self.tool('read', 'find it', '--effort', 'max')
-        self.assertIn('run -m opencode-go/deepseek-v4.1-flash#max |', done.stdout)
-        self.assertIn('| find it | agent plan', done.stdout)  # read and review cannot edit files
-        done = self.tool('read', 'find it', '--model', 'opencode/deepseek-v4.1-flash-free')
-        self.assertIn('run -m opencode/deepseek-v4.1-flash-free |', done.stdout)
-        done = self.tool('code', 'fix it')
-        self.assertIn('report: This is a coding task fr | run -m opencode-go/deepseek-v4.1-flash#max | fix it', done.stdout)
-        self.assertNotIn('agent plan', done.stdout)
-
-    def test_claude_is_the_default_and_deepseek_is_chosen(self):
-        del self.env['OC_MODEL']
-        done = self.tool('code', 'fix it')
-        self.assertEqual(done.stdout.strip(), 'claude report: -p --model sonnet | fix it')
-        self.assertNotIn('deepseek', done.stderr)
-        done = self.tool('read', 'find it', '--model', 'deepseek')
-        self.assertIn('run -m opencode-go/deepseek-v4.1-flash#low |', done.stdout)
-
-    def test_claude_code_takes_over_when_opencode_go_is_out(self):
-        done = self.tool('code', 'all out')
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.strip(), 'claude report: -p --model sonnet | all out')
-        self.assertIn('oc.py: deepseek: ', done.stderr)
-        self.assertIn('trying claude', done.stderr)
-        self.assertIn('answered by claude', done.stderr)
-        done = self.tool('read', 'all out')
-        self.assertEqual(done.stdout.strip(), 'claude report: -p --model haiku | all out')
-        done = self.tool('read', 'fail', '--model', 'claude')  # asked for Claude: one run, no fallback
-        self.assertEqual(done.returncode, 1)
-        self.assertNotIn('trying', done.stderr)
-
-    def test_a_timeout_ends_the_run_and_keeps_what_was_said(self):
+        self.assertEqual(done.stdout.strip(), 'claude report: -p --model sonnet --effort medium | make "a b" & c')
         start = time.monotonic()
-        done = self.tool('read', 'sleep', '--timeout', '5')
-        self.assertEqual(done.returncode, 124)
-        self.assertIn('timed out after 5 s', done.stderr)
-        self.assertIn('report: ', done.stdout)
+        timed = self.tool('read', '--harness', 'agy', 'sleep', '--timeout', '3')
+        self.assertEqual(timed.returncode, 124)
+        self.assertIn('timed out after 3 s', timed.stderr)
+        self.assertIn('agy report:', timed.stdout)
         self.assertLess(time.monotonic() - start, 30)
-
-    def test_a_run_has_no_time_limit_unless_one_is_given(self):
-        spec = importlib.util.spec_from_file_location('oc_under_test', install.REPO / 'tools' / 'oc.py')
-        oc = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(oc)
-        seen = []
-
-        def attempt(model, a, prompt, title):
-            seen.append(a.timeout)
-            return 'report', '', 0
-        for args in (['read'], ['code'], ['review'], ['code', '--timeout', '5']):
-            with patch.object(oc, 'attempt', attempt), patch.object(oc, 'count_review'), \
-                    patch.object(sys, 'argv', ['oc.py', *args[:1], 'brief', *args[1:]]), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                oc.main()
-        self.assertEqual(seen, [None, None, None, 5])
-
-    def test_fails_on_an_error_no_report_an_empty_brief_or_no_opencode(self):
-        failed = self.tool('read', 'fail')
-        self.assertEqual(failed.returncode, 1)
-        self.assertIn('quota reached', failed.stderr)
-        silent = self.tool('read', 'say nothing')
-        self.assertEqual((silent.returncode, silent.stdout), (1, ''))
-        self.assertIn('no report came back', silent.stderr)
+        self.assertEqual(self.tool('read', 'fail').returncode, 1)
+        self.assertEqual(self.tool('read', 'say nothing').returncode, 1)
         self.assertEqual(self.tool('read', ' ').returncode, 1)
-        self.env['PATH'] = str(self.bin / 'none')
-        self.assertIn('opencode is not on PATH', self.tool('read', 'x').stderr)
+        missing = self.tool('read', '--harness', 'agy', 'x', env={'PATH': str(self.bin / 'none')})
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn('agy is not on PATH', missing.stderr)
+
+    def test_large_agy_prompt_uses_temp_file_and_cleans_it(self):
+        big = 'x' * 25_000 + '\nend-marker'
+        done = self.tool('read', '--harness', 'agy', '-', input=big)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('| end-marker', done.stdout)
+
+
+class LaptopToolTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('laptop_tool', install.REPO / 'tools' / 'laptop.py')
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def test_runner_ps_handles_gpu_lock_and_worktree_cleanup(self):
+        gpu_ps = self.mod.build_remote_runner_ps('wip/test', 'wip-test', r'C:\src\Rubylight', r'C:\src\rl-offload',
+                                                 r'C:\src\butterpollo-release', 'python tools/dev.py cargo -- test', True, False)
+        self.assertIn('$UseGpu = $true', gpu_ps)
+        self.assertIn('$KeepWorktree = $false', gpu_ps)
+        self.assertIn('LAPTOP-LOCK', gpu_ps)
+        self.assertIn('worktree remove --force $Tree', gpu_ps)
+        self.assertIn('Remove-Item -LiteralPath $LockFile', gpu_ps)
+        cpu_ps = self.mod.build_remote_runner_ps('wip/test', 'wip-test', r'C:\src\Rubylight', r'C:\src\rl-offload',
+                                                 r'C:\src\butterpollo-release', 'tools\\dev.ps1 check', False, True)
+        self.assertIn('$UseGpu = $false', cpu_ps)
+        self.assertIn('$KeepWorktree = $true', cpu_ps)
+
+    def test_refuses_push_to_main_and_parses_status_json(self):
+        done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'laptop.py'),
+                               'run', '--branch', 'main', '--push', '--', 'echo hi'],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('refusing --push to main/master', done.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_ssh = Path(tmp) / 'fake_ssh.py'
+            fake_ssh.write_text(
+                'import json, sys\n'
+                'print(json.dumps({"host":"LAPTOP","console_user":"ramaz","console_ready":True,'
+                '"free_gb":512.0,"busy":[],"ready_cpu":True,"ready_gpu":True}))\n',
+                encoding='utf-8')
+            mfile = Path(tmp) / 'machine.json'
+            mfile.write_text(json.dumps({
+                'artifacts': tmp,
+                'hosts': {'laptop': {'ssh': 'ramaz@192.168.4.12'}},
+                'ssh': [sys.executable, str(fake_ssh)],
+            }), encoding='utf-8')
+            st = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'laptop.py'), 'status', '--json'],
+                                capture_output=True, text=True, env={**os.environ, 'CLAUDE_MACHINE_FILE': str(mfile)})
+            self.assertEqual(st.returncode, 0, st.stderr)
+            data = json.loads(st.stdout)
+            self.assertTrue(data['laptop']['ready_cpu'])
+            self.assertTrue(data['laptop']['ready_gpu'])
+            self.assertEqual(data['laptop']['free_gb'], 512.0)
 
 
 FAKE_SSH = '''import json, sys
@@ -1495,11 +1586,79 @@ class TaskToolTests(unittest.TestCase):
         self.assertIn('1 closed tasks still have a worktree', note['additionalContext'])
         again = self.tool('daily')
         self.assertEqual((again.returncode, again.stdout, again.stderr), (0, '', ''))
+        self.assertEqual(json.loads(self.tool('daily', '--antigravity').stdout), {})
+        (self.root / 'stamp').unlink()
+        ag_note = json.loads(self.tool('daily', '--antigravity').stdout)
+        self.assertIn('1 task folders', ag_note['injectSteps'][0]['systemMessage']['systemMessage'])
         (self.root / 'stamp').unlink()
         self.env['CLAUDE_MACHINE_FILE'] = str(self.root / 'none.json')
         broken = self.tool('daily')
         self.assertEqual((broken.returncode, broken.stdout, broken.stderr), (0, '', ''))
         self.refused('cannot read', 'sweep')
+
+    def test_sessions_prunes_dead_orca_dirs_and_old_transcripts_preserving_memory(self):
+        claude_dir = self.root / 'claude-home'
+        proj = claude_dir / 'projects'
+        ws_root = self.root / 'orca' / 'workspaces'
+        alive_ws = ws_root / 'repo' / 'live-one'
+        alive_ws.mkdir(parents=True)
+        alive_slug = re.sub(r'[:\\/._]', '-', os.path.abspath(str(alive_ws)))
+        dead_slug = re.sub(r'[:\\/._]', '-', os.path.abspath(str(ws_root / 'repo' / 'deleted-ws')))
+        (proj / alive_slug).mkdir(parents=True)
+        (proj / dead_slug).mkdir(parents=True)
+        (proj / dead_slug / 'old.jsonl').write_text('x' * 500, encoding='utf-8')
+        main_proj = proj / 'C--src-demo'
+        (main_proj / 'memory').mkdir(parents=True)
+        mem = main_proj / 'memory' / 'MEMORY.md'
+        old_tx = main_proj / 'old-session.jsonl'
+        new_tx = main_proj / 'new-session.jsonl'
+        mem.write_text('keep me\n', encoding='utf-8')
+        old_tx.write_text('old\n', encoding='utf-8')
+        new_tx.write_text('new\n', encoding='utf-8')
+        stale = time.time() - 20 * 86400
+        os.utime(mem, (stale, stale))
+        os.utime(old_tx, (stale, stale))
+
+        dry = self.tool('sessions', '--days', '14', '--projects-dir', str(proj), '--workspaces-root', str(ws_root))
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn('1 dead Orca workspace dirs', dry.stdout)
+        self.assertIn('1 transcript files older than 14 days', dry.stdout)
+        self.assertTrue((proj / dead_slug).exists())
+        self.assertTrue(old_tx.exists())
+
+        applied = self.tool('sessions', '--days', '14', '--apply', '--projects-dir', str(proj), '--workspaces-root', str(ws_root))
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertFalse((proj / dead_slug).exists())
+        self.assertTrue((proj / alive_slug).exists())
+        self.assertFalse(old_tx.exists())
+        self.assertTrue(new_tx.exists())
+        self.assertTrue(mem.exists())
+
+        # Antigravity session pruning preserves active conversationId and recent entries
+        gdir = self.root / 'gemini-cli'
+        (gdir / 'conversations').mkdir(parents=True)
+        (gdir / 'brain' / 'old-cid').mkdir(parents=True)
+        (gdir / 'brain' / 'active-cid').mkdir(parents=True)
+        old_db = gdir / 'conversations' / 'old-cid.db'
+        active_db = gdir / 'conversations' / 'active-cid.db'
+        fresh_db = gdir / 'conversations' / 'fresh-cid.db'
+        for p in (old_db, active_db, fresh_db, gdir / 'brain' / 'old-cid' / 'a.txt', gdir / 'brain' / 'active-cid' / 'a.txt'):
+            p.write_text('data\n', encoding='utf-8')
+        old_t = time.time() - 5 * 86400
+        for p in (old_db, active_db, gdir / 'brain' / 'old-cid' / 'a.txt', gdir / 'brain' / 'old-cid',
+                  gdir / 'brain' / 'active-cid' / 'a.txt', gdir / 'brain' / 'active-cid'):
+            os.utime(p, (old_t, old_t))
+        g_env = {**self.env, 'ANTIGRAVITY_CONVERSATION_ID': 'active-cid'}
+        g_done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'task.py'),
+                                 'sessions', '--days', '14', '--gemini-days', '3', '--apply',
+                                 '--projects-dir', str(proj), '--workspaces-root', str(ws_root), '--gemini-dir', str(gdir)],
+                                capture_output=True, text=True, env=g_env)
+        self.assertEqual(g_done.returncode, 0, g_done.stderr)
+        self.assertFalse(old_db.exists())
+        self.assertFalse((gdir / 'brain' / 'old-cid').exists())
+        self.assertTrue(active_db.exists())
+        self.assertTrue((gdir / 'brain' / 'active-cid').exists())
+        self.assertTrue(fresh_db.exists())
 
 
 FAKE_REMOTE = """import json, os, shutil, subprocess, sys

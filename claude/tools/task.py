@@ -11,6 +11,8 @@
   task.py daily                      the SessionStart hook: one line, at most once a day
   task.py caches [--days N] [--apply] [--json]
                                      list Cargo target folders idle N days (3); --apply deletes them
+  task.py sessions [--days N] [--apply] [--json]
+                                     list dead Orca project dirs & Claude transcripts older than N days (14)
 
 ~/.claude/machine.json says where the folders go on this machine:
 
@@ -888,11 +890,185 @@ def caches(cfg, days, apply, as_json):
     print(f'freed {freed / 1e9:.2f} GB, {len(failed)} failed')
 
 
-def daily():
+def _live_sessions(claude_home):
+    """Return (active_session_ids, active_cwds) for currently running Claude Code processes."""
+    sids, cwds = set(), set()
+    sdir = os.path.join(claude_home, 'sessions')
+    if not os.path.isdir(sdir):
+        return sids, cwds
+    for entry in entries(sdir):
+        if not entry.name.endswith('.json'):
+            continue
+        try:
+            with open(entry.path, encoding='utf-8') as f:
+                data = json.load(f)
+            pid = int(data.get('pid', 0))
+        except (OSError, ValueError, TypeError):
+            continue
+        if pid and process(pid) is not None:
+            if data.get('sessionId'):
+                sids.add(str(data['sessionId']))
+            if data.get('cwd'):
+                cwds.add(real(data['cwd']))
+    return sids, cwds
+
+
+def _claude_proj_key(path):
+    """Match Claude Code's project folder slug (drive colon, separators, dots, underscores -> `-`)."""
+    key = re.sub(r'[:\\/._]', '-', os.path.abspath(path))
+    return key.lower() if os.name == 'nt' else key
+
+
+def _existing_orca_keys(workspaces_root):
+    """Normalized Claude project-folder names for every existing Orca workspace directory."""
+    keys = set()
+    if not os.path.isdir(workspaces_root):
+        return keys
+    for repo in entries(workspaces_root):
+        if not repo.is_dir(follow_symlinks=False):
+            continue
+        for ws in entries(repo.path):
+            if ws.is_dir(follow_symlinks=False):
+                keys.add(_claude_proj_key(ws.path))
+    return keys
+
+
+def _scan_gemini_sessions(gemini_dir, gemini_days):
+    """Scan ~/.gemini/antigravity-cli/{conversations,brain} for size and stale items (>gemini_days)."""
+    root = gemini_dir or os.path.expanduser(os.path.join('~', '.gemini', 'antigravity-cli'))
+    if not os.path.isdir(root):
+        return {'exists': False, 'total_bytes': 0, 'stale': []}
+    active_cid = (os.environ.get('ANTIGRAVITY_CONVERSATION_ID') or '').strip().lower()
+    cutoff = time.time() - gemini_days * 86400.0 if gemini_days is not None else None
+    total_bytes, stale = 0, []
+    for sub in ('conversations', 'brain'):
+        d = os.path.join(root, sub)
+        if not os.path.isdir(d):
+            continue
+        for entry in sorted(entries(d), key=lambda e: e.name):
+            if linked(entry.path):
+                continue
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            b = size_of(entry.path) if is_dir else st.st_size
+            total_bytes += b
+            if cutoff is None:
+                continue
+            stem = entry.name.split('.', 1)[0].lower()
+            if active_cid and stem == active_cid:
+                continue
+            mtime = newest(entry.path) if is_dir else st.st_mtime
+            if mtime < cutoff:
+                if not is_dir and running(entry.path):
+                    continue
+                stale.append({'path': entry.path, 'bytes': b})
+    return {'exists': True, 'root': root, 'total_bytes': total_bytes, 'stale': stale}
+
+
+def sessions(days, apply, as_json, projects_dir=None, workspaces_root=None, gemini_days=None, gemini_dir=None):
+    """List (and with --apply delete) dead Orca project dirs, old Claude transcripts, and optionally old Antigravity sessions.
+
+    Strictly preserves `memory/` directories, any live Claude session in `~/.claude/sessions/`, and the active
+    Antigravity conversation (`ANTIGRAVITY_CONVERSATION_ID`) plus any locked `.db` files.
+    """
+    claude_home = os.path.dirname(projects_dir) if projects_dir else HOME
+    proj_root = projects_dir or os.path.join(claude_home, 'projects')
+    ws_root = workspaces_root or os.path.expanduser(os.path.join('~', 'orca', 'workspaces'))
+    gem = _scan_gemini_sessions(gemini_dir, gemini_days)
+    dead_dirs, old_files = [], []
+
+    if os.path.isdir(proj_root):
+        live_sids, live_cwds = _live_sessions(claude_home)
+        live_keys = {_claude_proj_key(p) for p in live_cwds}
+        existing_orca = _existing_orca_keys(ws_root)
+        cutoff = time.time() - days * 86400.0
+        for proj in sorted(entries(proj_root), key=lambda e: e.name):
+            if not proj.is_dir(follow_symlinks=False) or linked(proj.path):
+                continue
+            proj_key = proj.name.lower() if os.name == 'nt' else proj.name
+            if '-orca-workspaces-' in proj_key and proj_key not in existing_orca and proj_key not in live_keys:
+                dead_dirs.append({'path': proj.path, 'bytes': size_of(proj.path)})
+                continue
+            for dirpath, dirnames, filenames in os.walk(proj.path, topdown=True):
+                # Never touch `memory/` or symlinked subdirectories.
+                dirnames[:] = [d for d in dirnames if d.lower() != 'memory' and not linked(os.path.join(dirpath, d))]
+                for fname in filenames:
+                    fpath = os.path.join(dirpath, fname)
+                    if linked(fpath):
+                        continue
+                    if any(sid and sid in fname for sid in live_sids) or any(sid and sid in dirpath for sid in live_sids):
+                        continue
+                    try:
+                        st = os.lstat(fpath)
+                    except OSError:
+                        continue
+                    if st.st_mtime < cutoff:
+                        old_files.append({'path': fpath, 'bytes': st.st_size})
+
+    gem_stale = gem['stale']
+    total = sum(r['bytes'] for r in dead_dirs) + sum(r['bytes'] for r in old_files) + sum(r['bytes'] for r in gem_stale)
+    freed, failed = 0, []
+    if apply:
+        for row in dead_dirs:
+            try:
+                remove(row['path'])
+                freed += row['bytes']
+            except OSError as error:
+                failed.append({'path': row['path'], 'error': str(error)})
+        touched_dirs = set()
+        for row in old_files:
+            try:
+                remove(row['path'])
+                freed += row['bytes']
+                touched_dirs.add(os.path.dirname(row['path']))
+            except OSError as error:
+                failed.append({'path': row['path'], 'error': str(error)})
+        for d in sorted(touched_dirs, key=len, reverse=True):
+            if inside(d, proj_root) and os.path.basename(d).lower() != 'memory':
+                with contextlib.suppress(OSError):
+                    if not os.listdir(d):
+                        os.rmdir(d)
+        for row in gem_stale:
+            try:
+                remove(row['path'])
+                freed += row['bytes']
+            except OSError as error:
+                failed.append({'path': row['path'], 'error': str(error)})
+
+    if as_json:
+        return print(json.dumps({'applied': apply, 'days': days, 'dead_dirs': dead_dirs, 'old_files_count': len(old_files),
+                                 'old_files_bytes': sum(r['bytes'] for r in old_files),
+                                 'gemini_total_bytes': gem['total_bytes'], 'gemini_stale_count': len(gem_stale),
+                                 'gemini_stale_bytes': sum(r['bytes'] for r in gem_stale),
+                                 'total_bytes': total, 'freed_bytes': freed, 'failed': failed}, indent=1))
+    print(f'{len(dead_dirs)} dead Orca workspace dirs ({sum(r["bytes"] for r in dead_dirs) / 1e6:.1f} MB), '
+          f'{len(old_files)} transcript files older than {days:g} days ({sum(r["bytes"] for r in old_files) / 1e6:.1f} MB) '
+          f'— Claude total {(sum(r["bytes"] for r in dead_dirs) + sum(r["bytes"] for r in old_files)) / 1e9:.2f} GB')
+    if gem['exists']:
+        if gemini_days is not None:
+            print(f'Antigravity: {len(gem_stale)} entries older than {gemini_days:g} days '
+                  f'({sum(r["bytes"] for r in gem_stale) / 1e9:.2f} GB of {gem["total_bytes"] / 1e9:.2f} GB)')
+        elif gem['total_bytes'] > 500_000_000:
+            print(f'Antigravity cache: {gem["total_bytes"] / 1e9:.2f} GB (pass `--gemini-days 3` to include stale entries)')
+    if not apply:
+        tool = os.path.abspath(__file__).replace('\\', '/')
+        gflag = f' --gemini-days {gemini_days:g}' if gemini_days is not None else ''
+        return print(f'dry run, nothing deleted; to clean: python "{tool}" sessions --days {days:g}{gflag} --apply')
+    for row in failed:
+        print(f'FAILED {row["path"]}: {row["error"]}')
+    print(f'freed {freed / 1e9:.2f} GB, {len(failed)} failed')
+
+
+def daily(agy=False):
     """One line for a new session when task folders look finished, at most once a day; never an error."""
     stamp = os.environ.get('CLAUDE_TASK_STAMP') or os.path.join(HOME, 'task-daily.stamp')
     try:
         if time.time() - os.path.getmtime(stamp) < 86400:
+            if agy:
+                print('{}')
             return
     except OSError:
         pass
@@ -903,9 +1079,14 @@ def daily():
     finished, closed = sum(1 for r in found if r.get('finished')), sum(1 for r in found if r['state'] == 'closed')
     if finished or closed:
         tool = os.path.abspath(__file__).replace('\\', '/')
-        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext':
-              f'{finished} task folders in {cfg["artifacts"]} look finished and {closed} closed tasks still have a worktree: '
-              f'`python "{tool}" sweep` lists them. Close or remove only your own, or what the user asks for.'}}))
+        msg = (f'{finished} task folders in {cfg["artifacts"]} look finished and {closed} closed tasks still have a worktree: '
+               f'`python "{tool}" sweep` lists them. Close or remove only your own, or what the user asks for.')
+        if agy:
+            print(json.dumps({'injectSteps': [{'systemMessage': {'systemMessage': msg}}]}))
+        else:
+            print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': msg}}))
+    elif agy:
+        print('{}')
 
 
 def main():
@@ -920,18 +1101,30 @@ def main():
     adding.add_argument('--shell', choices=sorted(SHELLS))
     adding.add_argument('--why', help='what the command puts back')
     sub.add_parser('sweep').add_argument('--json', action='store_true')
-    sub.add_parser('daily')
+    sub.add_parser('daily').add_argument('--antigravity', action='store_true', help='emit Antigravity SessionStart JSON')
     caching = sub.add_parser('caches')
     caching.add_argument('--days', type=float, default=IDLE_DAYS)
     caching.add_argument('--apply', action='store_true')
     caching.add_argument('--json', action='store_true')
+    sess = sub.add_parser('sessions')
+    sess.add_argument('--days', type=float, default=14)
+    sess.add_argument('--apply', action='store_true')
+    sess.add_argument('--json', action='store_true')
+    sess.add_argument('--projects-dir', default=None)
+    sess.add_argument('--workspaces-root', default=None)
+    sess.add_argument('--gemini-days', type=float, default=None, help='also prune Antigravity conversations/brain older than N days')
+    sess.add_argument('--gemini-dir', default=None)
     args = ap.parse_args()
     if args.action == 'daily':
         try:
-            daily()
+            daily(agy=args.antigravity)
         except BaseException:  # a hook must never break a session's start
-            pass
+            if args.antigravity:
+                print('{}')
         return
+    if args.action == 'sessions':
+        return sessions(args.days, args.apply, args.json, args.projects_dir, args.workspaces_root,
+                        args.gemini_days, args.gemini_dir)
     cfg = settings()
     if args.action == 'open':
         open_task(cfg, args.name)

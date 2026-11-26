@@ -1,16 +1,18 @@
 # Working rules
 
-Aim for momentum: small verified changes landed on main, in few turns and little context.
+Aim for momentum: small verified changes landed on main, in few turns and lean context.
 
-- Work autonomously; ask only when a consequential decision cannot be inferred. Check each premise against the code (`origin/main` after a fetch), a measurement or its source. Keep the scope focused; preserve unrelated work.
-- You decide, write fixes up to ~60 lines and land. The rest goes to a worker: `read` for a survey that would read more than two or three files and for long logs (a quick search stays yours), `write` for scaffolding, translation and fully specified edits, `code` for larger fixes, `review` for review. In Claude Code run `python ~/.claude/tools/oc.py <mode> --dir <checkout> "<brief>"` in the background with the Bash `timeout` at 7200000 (the tool stops a background command after 30 min otherwise; oc.py sets no limit); it prints only the report and runs Claude models (Haiku for read and write, Sonnet for code and review). When the user asks for DeepSeek, pass `--model deepseek` (or `OC_MODEL=deepseek` is set): DeepSeek V4.1 Flash (never Pro) on OpenCode Go then works at the effort the mode needs, and Claude takes over when Go's limit is reached. In OpenCode use the subagents `scout` (read), `mechanic` (write), `coder` (code), `reviewer` (review) and `runner` (builds and tests). Claude runs only in Claude Code, never through OpenCode: a review by Opus the user asks for runs as an Orca worker (`--agent claude --model opus`, as in the `issue-batch` skill). A worker does its own work.
-- Brief a worker with the end state, the check that proves it, paths with line ranges and when to stop. Check what it reports before relying on it.
-- Verify with the narrowest fitting check, add a regression test where useful, review your diff, and say what stayed unverified.
-- Before landing a change over ~150 code lines or one in concurrency, lifetime, protocol, decoder or release code, have it reviewed with the request in the user's words; in Claude Code a hook holds an unreviewed push to main. Fix the findings; review again only after a High one.
-- Commit only the task's changes with a specific conventional message, then land: `python "$HOME/.claude/tools/land.py" --repo <checkout> --check "<affected checks>"`. Never commit secrets, force-push, rewrite shared history, open PRs, tag or publish unless asked.
-- One issue per chat; stop once it has landed and been reported. A list of issues goes through the `issue-batch` skill.
-- Lean context: batch independent reads in one turn, read only the ranges needed, filter output to errors and tails, wait on builds and CI in the background.
-- Build in the project's pool when AGENTS.md names one, else below the artifacts root `personal.md` names; scratch in temp. Before reporting, delete what you made, stop your workers, remove landed worktrees.
-- Report concisely: result, decisions, verification, limits; name each part of the request as done, not done (why) or not verified.
+- Work autonomously; ask only when a consequential decision cannot be inferred. Check each premise against `origin/main` (after a fetch), a measurement, or official docs (`WebSearch`/`WebFetch` when a device is not local). Keep scope focused; preserve unrelated work.
+- Tune `/effort` to the task: `low` (git/CI/lookups), `medium` (small fixes/docs), `high` (multi-file work/reviews), `xhigh` (hard bugs/architecture/deep reviews).
+- You decide, write fixes up to ~60 lines, and land. Delegate the rest to native subagents first (keeps the 1h prompt cache): `scout` (Haiku, read-only surveys >2-3 files or long logs), `coder` (Sonnet, larger fixes/scaffolding/tests), `reviewer` (Opus, independent review). Brief with end state, narrowest check, paths/lines and stop condition; verify reports before relying on them.
+- Cross-harness opt-in (never by default): only when the user explicitly asks for an Antigravity review or task, run `python ~/.claude/tools/worker.py <read|write|code|review> --harness agy --dir <checkout> "<brief>"` (Carbon in plan mode for `review`, Neon for `code`; a clean `review` unlocks the push gate).
+- Laptop offload: when working on the PC and offloading CPU or GPU builds, tests or hardware runs, use `python ~/.claude/tools/laptop.py status|run|check|clean` (respects locks, runs in the Interactive desktop session, cleans its detached worktree; exit 3 is an AMD hang — investigate, never retry).
+- Verify with the narrowest check, add a regression test where useful, review your diff, and say what stayed unverified.
+- Before landing >150 code lines or concurrency, lifetime, protocol, decoder or release changes, have `reviewer` check the diff against the user's request; a hook holds unreviewed pushes to main. Fix findings; re-review only after a High one.
+- Commit only the task's changes with a conventional message, then land: `python "$HOME/.claude/tools/land.py" --repo <checkout> --check "<affected checks>"`. Never commit secrets, force-push, rewrite shared history, open PRs, tag or publish unless asked.
+- One issue per chat; stop once landed and reported. Lists of issues use the `issue-batch` skill.
+- Lean context: batch independent reads in one turn, read only needed ranges, filter output to errors/tails, run long builds/CI in the background.
+- Zero garbage, zero firewall prompts: build in the shared pool (Rubylight: `python tools/dev.py cargo -- <args>`, Gradle via `build_lock.py --lane gradle -- ... --no-daemon`), bind test/dev servers to `127.0.0.1`/`[::1]`, keep scratch in temp, and clean temp dirs, stop workers and remove landed worktrees before reporting (`task.py caches|sessions`).
+- Report concisely: result, decisions, verification, limits; mark each item done, not done (why) or not verified.
 
 @~/.claude/personal.md
