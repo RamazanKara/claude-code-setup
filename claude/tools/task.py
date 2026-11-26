@@ -934,8 +934,8 @@ def _live_sessions(claude_home):
 
 
 def _claude_proj_key(path):
-    """Match Claude Code's project folder slug (drive colon, separators, dots, underscores -> `-`)."""
-    key = re.sub(r'[:\\/._]', '-', os.path.abspath(path))
+    """Match Claude Code's project folder slug (non-alphanumeric characters -> `-`)."""
+    key = re.sub(r'[^A-Za-z0-9-]', '-', os.path.abspath(path))
     return key.lower() if os.name == 'nt' else key
 
 
@@ -1043,7 +1043,8 @@ def sessions(days, apply, as_json, projects_dir=None, workspaces_root=None, gemi
     if os.path.isdir(proj_root):
         live_sids, live_cwds = _live_sessions(claude_home)
         live_keys = {_claude_proj_key(p) for p in live_cwds}
-        existing_orca = _existing_orca_keys(ws_root)
+        has_ws_root = os.path.isdir(ws_root)
+        existing_orca = _existing_orca_keys(ws_root) if has_ws_root else set()
         active_prefixes = existing_orca | live_keys
         cutoff = time.time() - days * 86400.0
         for proj in sorted(entries(proj_root), key=lambda e: e.name):
@@ -1051,7 +1052,7 @@ def sessions(days, apply, as_json, projects_dir=None, workspaces_root=None, gemi
                 continue
             proj_key = proj.name.lower() if os.name == 'nt' else proj.name
             alive_ws = any(proj_key == k or proj_key.startswith(k + '-') for k in active_prefixes)
-            if '-orca-workspaces-' in proj_key and not alive_ws and not _has_memory_dir(proj.path):
+            if has_ws_root and '-orca-workspaces-' in proj_key and not alive_ws and not _has_memory_dir(proj.path):
                 dead_dirs.append({'path': proj.path, 'bytes': size_of(proj.path)})
                 continue
             for dirpath, dirnames, filenames in os.walk(proj.path, topdown=True):
@@ -1116,6 +1117,10 @@ def sessions(days, apply, as_json, projects_dir=None, workspaces_root=None, gemi
         elif gem['total_bytes'] > 500_000_000:
             print(f'Antigravity cache: {gem["total_bytes"] / 1e9:.2f} GB (pass `--gemini-days 3` to include stale entries)')
     if not apply:
+        for row in dead_dirs[:20]:
+            print(f'  dead-dir: {row["path"]} ({row["bytes"] / 1e6:.1f} MB)')
+        if len(dead_dirs) > 20:
+            print(f'  ... and {len(dead_dirs) - 20} more dead dirs')
         tool = os.path.abspath(__file__).replace('\\', '/')
         gflag = f' --gemini-days {gemini_days:g}' if gemini_days is not None else ''
         return print(f'dry run, nothing deleted; to clean: python "{tool}" sessions --days {days:g}{gflag} --apply')

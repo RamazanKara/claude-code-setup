@@ -45,7 +45,7 @@ DEV_TOOL = re.compile(r'\btools[\\/]+dev\.(?:ps1|py)\b', re.I)
 
 LOOPBACK = r'(?:127\.0\.0\.1|localhost|\[::1\]|::1)'
 WILDCARD_HTTP_SERVER = re.compile(
-    r'\bpython(?:\.exe)?\b[^\n;|&]*\s-m\s+http\.server\b(?![^\n;|&]*(?:-b|--bind)(?:\s+|=)' + LOOPBACK + r'(?=$|[\s;&|<>]))',
+    r'\b(?:python3?|py)(?:\.exe)?\b[^\n;|&]*\s-m\s+http\.server\b(?![^\n;|&]*(?:-b|--bind)(?:\s+|=)' + LOOPBACK + r'(?=$|[\s;&|<>]))',
     re.I)
 WILDCARD_VITE_HOST = re.compile(
     r'\b(?:vite|npm(?:\.cmd)?\s+run\s+(?:dev|preview))\b[^\n;|&]*--host(?!(?:\s+|=)' + LOOPBACK + r'(?=$|[\s;&|<>]))(?=$|[\s=;&|<>])',

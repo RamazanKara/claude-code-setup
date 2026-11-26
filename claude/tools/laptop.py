@@ -119,7 +119,7 @@ foreach ($n in 'BUILD-LOCK', 'LAPTOP-LOCK', 'PRIORITY') {{
   $f = Join-Path $locks $n
   if (-not (Test-Path -LiteralPath $f)) {{ continue }}
   $t = (Get-Content -LiteralPath $f -Raw)
-  if ($n -eq 'PRIORITY' -and $t -match 'pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {{ continue }}
+  if ($n -in 'PRIORITY','LAPTOP-LOCK' -and $t -match 'pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {{ continue }}
   $busy += "$n`: $($t.Trim())"
 }}
 foreach ($d in (Join-Path $locks 'lanes'), $pool) {{
@@ -277,7 +277,7 @@ try {{
     $env:PATH = "$env:USERPROFILE\\.cargo\\bin;$env:PATH;C:\\msys64\\ucrt64\\bin"
     if ($UseGpu) {{
         New-Item -ItemType Directory -Force -Path $Locks | Out-Null
-        "laptop.py offload $Name ($(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'))" | Out-File $LockFile -Encoding utf8
+        "laptop.py offload $Name pid=$PID ($(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'))" | Out-File $LockFile -Encoding utf8
         $TookLock = $true
     }}
     git -C $Repo fetch -q origin 2>&1 | Out-File -Append $Log -Encoding utf8
@@ -333,7 +333,7 @@ foreach ($n in 'BUILD-LOCK', 'LAPTOP-LOCK', 'PRIORITY') {{
   $f = Join-Path $locks $n
   if (-not (Test-Path -LiteralPath $f)) {{ continue }}
   $t = Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue
-  if ($n -eq 'PRIORITY' -and $t -match 'pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {{ continue }}
+  if ($n -in 'PRIORITY','LAPTOP-LOCK' -and $t -match 'pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {{ continue }}
   $busy += "$n`: $($t.Trim())"
 }}
 foreach ($d in (Join-Path $locks 'lanes'), $pool) {{
@@ -375,7 +375,14 @@ def cmd_run(args, cfg):
     command_parts = list(args.command)
     if command_parts and command_parts[0] == '--':
         command_parts = command_parts[1:]
-    command = ' '.join(command_parts).strip()
+    if len(command_parts) == 1:
+        command = command_parts[0].strip()
+    else:
+        def _ps_arg(tok: str) -> str:
+            if not tok or re.search(r'[\s"\'`$|;&<>()]', tok):
+                return "'" + tok.replace("'", "''") + "'"
+            return tok
+        command = ' '.join(_ps_arg(tok) for tok in command_parts).strip()
     if not command:
         print('laptop.py: missing remote command after `--`', file=sys.stderr)
         return 1
@@ -448,6 +455,9 @@ def cmd_run(args, cfg):
             return code if code in (4, 5) else 1
         print(f'laptop.py: laptop busy, retrying in 30s: {" ".join((out or err).split())}', flush=True)
         time.sleep(30)
+
+    # Reset execution deadline once started so time spent in --wait does not eat into --timeout.
+    deadline = time.monotonic() + args.timeout * 60
 
     shown = 0
     log_text = ''
@@ -557,6 +567,13 @@ foreach ($root in $Roots) {{
 }}
 if ($Apply) {{
   git -C $Repo worktree prune 2>$null | Out-Null
+  $lockFile = Join-Path {ps_quote(DEFAULT_LOCKS)} 'LAPTOP-LOCK'
+  if (-not ($running | Where-Object {{ $_ -like 'rl-offload-*' }}) -and (Test-Path -LiteralPath $lockFile)) {{
+    $lt = Get-Content -LiteralPath $lockFile -Raw -ErrorAction SilentlyContinue
+    if ($lt -match 'laptop\.py offload' -and $lt -match 'pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) {{
+      Remove-Item -LiteralPath $lockFile -ErrorAction SilentlyContinue
+    }}
+  }}
 }}
 $freeGb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
 $prunedPool = $false

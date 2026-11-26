@@ -1032,6 +1032,8 @@ class CargoPoolHookTests(unittest.TestCase):
                     r'cmd /c client\gradlew.bat -p client assembleNonRootDebug',
                     r'python tools/build_lock.py --lane gradle -- cmd /c client\gradlew.bat -p client assembleNonRootDebug',
                     'python -m http.server 8000',
+                    'python3 -m http.server 8000',
+                    'py -m http.server 8000',
                     'npx vite --host',
                     'npx vite --host > vite.log 2>&1',
                     'npm run dev -- --host 0.0.0.0'):
@@ -1240,18 +1242,26 @@ class LaptopToolTests(unittest.TestCase):
         self.assertIn('LAPTOP-LOCK', gpu_ps)
         self.assertIn('worktree remove --force $Tree', gpu_ps)
         self.assertIn('Remove-Item -LiteralPath $LockFile', gpu_ps)
+        self.assertIn('pid=$PID', gpu_ps)
         cpu_ps = self.mod.build_remote_runner_ps('wip/test', 'wip-test', r'C:\src\Rubylight', r'C:\src\rl-offload',
                                                  r'C:\src\butterpollo-release', 'tools\\dev.ps1 check', False, True)
         self.assertIn('$UseGpu = $false', cpu_ps)
         self.assertIn('$KeepWorktree = $true', cpu_ps)
-        # End-to-end verification that PowerShell preserves exit code 3 (AMD encoder hang sentinel) via -File wrapper.
+        # End-to-end verification extracting the real wrapper from build_remote_runner_ps preserves exit code 3.
         pwsh = shutil.which('pwsh') or shutil.which('powershell')
         if pwsh:
+            cmd_text = f'& "{sys.executable}" -c "import sys; sys.exit(3)"'
+            real_ps = self.mod.build_remote_runner_ps('wip/t', 't', r'C:\src\R', r'C:\src\W', r'C:\src\L', cmd_text, False, False)
+            m = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", real_ps)
+            self.assertIsNotNone(m)
+            decoded = base64.b64decode(m.group(1)).decode('utf-8')
+            self.assertEqual(decoded, cmd_text)
+            m_wrap = re.search(r'\$wrapper\s*=\s*\$CmdText\s*\+\s*"([^"]+)"', real_ps)
+            self.assertIsNotNone(m_wrap)
+            suffix = m_wrap.group(1).replace('`r`n', '\n').replace('`$', '$')
             with tempfile.TemporaryDirectory() as tmp:
                 cmd_script = Path(tmp) / 'cmd-test.ps1'
-                cmd_text = f'& "{sys.executable}" -c "import sys; sys.exit(3)"'
-                wrapper = cmd_text + '\nif ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 }\n'
-                cmd_script.write_text(wrapper, encoding='utf-8')
+                cmd_script.write_text(decoded + suffix, encoding='utf-8')
                 res = subprocess.run([pwsh, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(cmd_script)],
                                      capture_output=True, text=True)
                 self.assertEqual(res.returncode, 3)
@@ -1688,7 +1698,12 @@ class TaskToolTests(unittest.TestCase):
         dry = self.tool('sessions', '--days', '14', '--projects-dir', str(proj), '--workspaces-root', str(ws_root))
         self.assertEqual(dry.returncode, 0, dry.stderr)
         self.assertIn('1 dead Orca workspace dirs', dry.stdout)
+        self.assertIn('dead-dir:', dry.stdout)
         self.assertIn('1 transcript files older than 14 days', dry.stdout)
+        # Missing workspaces_root must never mark any Orca project dir as dead.
+        no_ws = self.tool('sessions', '--days', '14', '--projects-dir', str(proj), '--workspaces-root', str(self.root / 'missing-ws'))
+        self.assertEqual(no_ws.returncode, 0, no_ws.stderr)
+        self.assertIn('0 dead Orca workspace dirs', no_ws.stdout)
         self.assertTrue((proj / dead_slug).exists())
         self.assertTrue(old_tx.exists())
 
