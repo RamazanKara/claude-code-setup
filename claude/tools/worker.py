@@ -6,15 +6,15 @@ By default this stays on the active harness (never switches harnesses silently):
   - Inside Claude Code (or default): runs `claude -p` (Haiku low for read, Sonnet medium for write,
     Sonnet high for code, Opus high for review; `--disallowedTools` enforces read-only on read/review).
   - Inside Antigravity (`ANTIGRAVITY_AGENT=1`): runs `agy --print` (Gemini 4 Hydrogen low in plan mode
-    for read, Hydrogen high for write, Neon xhigh for code, Carbon high in plan mode for review).
+    for read, Neon high for write, Neon xhigh for code, Neon high in plan mode for review).
 
 Opt-in cross-harness delegation / second-opinion review (ONLY when explicitly requested):
-  python worker.py review --harness agy    --dir <repo> "<brief>"   # from Claude Code -> Antigravity Carbon
+  python worker.py review --harness agy    --dir <repo> "<brief>"   # from Claude Code -> Antigravity Neon
   python worker.py review --harness claude --effort xhigh --dir <repo> "<brief>"  # from Antigravity -> Opus 5.5
 
-A finished `review` ending with `Reviewed: <repo>` unlocks the push gate (`review_gate.py`) for either
-harness. Options: `--dir <checkout>`, `--harness auto|claude|agy`, `--model <id>`,
-`--effort low|medium|high|xhigh|max`, `--timeout <seconds, default none>`.
+A finished `review` with no High findings ending with `Reviewed: <repo>` unlocks the push gate
+(`review_gate.py`) for either harness. Options: `--dir <checkout>`, `--harness auto|claude|agy`,
+`--model <id>`, `--effort low|medium|high|xhigh|max`, `--timeout <seconds, default none>`.
 Exit code 124 is a `--timeout` that ran out; whatever the worker had printed is preserved.
 """
 import argparse, os, shutil, signal, subprocess, sys, tempfile
@@ -23,13 +23,16 @@ CLAUDE_MODELS = {'read': 'haiku', 'write': 'sonnet', 'code': 'sonnet', 'review':
 CLAUDE_EFFORT = {'read': 'low', 'write': 'medium', 'code': 'high', 'review': 'high'}
 AGY_BASES = {
     'read': ('gemini-4-hydrogen', ('low', 'medium', 'high', 'xhigh')),
-    'write': ('gemini-4-hydrogen', ('low', 'medium', 'high', 'xhigh')),
+    'write': ('gemini-4-neon', ('low', 'medium', 'high', 'xhigh')),
     'code': ('gemini-4-neon', ('low', 'medium', 'high', 'xhigh')),
-    'review': ('gemini-4-carbon', ('low', 'medium', 'high')),
+    'review': ('gemini-4-neon', ('low', 'medium', 'high', 'xhigh')),
 }
 AGY_EFFORT = {'read': 'low', 'write': 'high', 'code': 'xhigh', 'review': 'high'}
 READONLY_DISALLOWED = ['Write', 'Edit', 'NotebookEdit']
-ORCA_PARENT_ENV = ('ORCA_AGENT_SESSION_ID', 'ORCA_AGENT_SESSION_SPAWN_TOKEN', 'ORCA_PANE_KEY')
+ORCA_PARENT_ENV = (
+    'ORCA_AGENT_SESSION_ID', 'ORCA_AGENT_SESSION_SPAWN_TOKEN', 'ORCA_PANE_KEY',
+    'ORCA_TAB_ID', 'ORCA_AGENT_LAUNCH_TOKEN', 'ORCA_WORKTREE_ID',
+)
 AGY_INLINE_LIMIT = 20_000  # bytes; larger prompts go through a temp file cleaned in finally
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -82,7 +85,7 @@ def stop(run):
 
 
 def resolve_agy_model_effort(mode, model_override, effort_override):
-    """Pick matching Antigravity model ID and effort tier (clamping Carbon to high and max -> xhigh)."""
+    """Pick matching Antigravity model ID and effort tier (clamping max -> xhigh and unknown tiers)."""
     effort = effort_override or AGY_EFFORT[mode]
     if model_override:
         return model_override, effort
@@ -121,10 +124,12 @@ def build_command(harness, args, prompt, prompt_file=None):
 
 
 def _strip_orca_parent_env(env):
-    """Strip interactive Orca pane/session hook env vars so child worker runs never trigger parent pane hooks."""
+    """Strip interactive Orca pane/session hook env vars and disable startup hooks in headless workers."""
     for key in list(env):
         if key in ORCA_PARENT_ENV or key.startswith('ORCA_AGENT_HOOK'):
             env.pop(key, None)
+    env['CLAUDE_FRESH_CHECKOUT'] = '0'
+    env['CLAUDE_TASK_DAILY'] = '0'
     return env
 
 

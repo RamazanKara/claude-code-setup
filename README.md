@@ -14,7 +14,7 @@ python install.py
 The installer:
 - Copies `claude/CLAUDE.md`, native Claude Code subagents (`scout`, `coder`, `reviewer`), dual-harness hooks, shared tools, and skills into `~/.claude/` (ignoring Orca's `CLAUDE_CONFIG_DIR` profile override).
 - Merges `claude/settings.json` into `~/.claude/settings.json` (preserving Orca hooks while marking Orca telemetry hooks `async: true`, removing legacy overrides, keeping `subagentPromptCacheTtl: "1h"`, `bashOutputMaxChars: 12000`, `autoCompactWindow: 300000` for Opus/Sonnet/Fable, and `autoMemoryEnabled: false`).
-- When `~/.gemini/config/` exists, writes `GEMINI.md` (from `antigravity/GEMINI.md` with `~/.claude/personal.md` inlined), merges a `"workflow-guards"` hook group into `~/.gemini/config/hooks.json` (preserving `"orca-status"` and any user groups), and copies the shared skills into `~/.gemini/config/skills/` (preserving Orca's skills).
+- When `~/.gemini/config/` exists, writes a lean `GEMINI.md` (from `antigravity/GEMINI.md` with `~/.claude/personal.md` inlined), installs a safety-only `"workflow-guards"` hook (`pre_bash.py --pool-only` on `run_command`, removing stale `"orca-status"` hooks while preserving custom user groups), and copies Antigravity-relevant skills (`merge-train`, `public-copy`) into `~/.gemini/config/skills/`.
 - Retires legacy Codex files and superseded tools (`deepseek.py`, `oc.py`), backing up everything replaced under `~/.claude/backups/`.
 
 ## Key Workflows
@@ -22,11 +22,11 @@ The installer:
 ### 1. Native Subagents First, Opt-In Cross-Harness Delegation (`worker.py`)
 Both harnesses stay **native by default** (never silently crossing harnesses):
 - **Claude Code**: uses native subagents (`scout` Haiku/low read-only + web, `coder` Sonnet/high, `reviewer` Opus/high read-only + web) to preserve the 1h prompt cache.
-- **Antigravity**: uses Orchestrator (Neon), native `research`/`self` subagents, and `/swarm` when explicitly invoked.
+- **Antigravity**: runs directly on `Gemini 4 Neon` (High/XHigh), native `research`/`self` subagents, and `/swarm` when explicitly invoked (avoiding `Orchestrator (Neon)` for coding so Flash does not write code).
 - **Opt-in cross-harness** (only when explicitly requested, e.g. for an independent second opinion):
-  - From Claude Code -> Antigravity Carbon review: `python ~/.claude/tools/worker.py review --harness agy --dir <checkout> "<brief>"`
+  - From Claude Code -> Antigravity Neon review: `python ~/.claude/tools/worker.py review --harness agy --dir <checkout> "<brief>"` (`gemini-4-neon-high` in plan mode; `--effort xhigh` for deep reviews)
   - From Antigravity -> Claude Opus 5.5 review: `python ~/.claude/tools/worker.py review --harness claude --effort xhigh --dir <checkout> "<brief>"`
-  - `read` and `review` enforce read-only (`--disallowedTools` on Claude, `--mode plan` on Antigravity). A clean `review` ending with `Reviewed: <repo>` unlocks `review_gate.py` and `land.py` for either harness.
+  - `read` and `review` enforce read-only (`--disallowedTools` on Claude, `--mode plan` on Antigravity) and skip startup `fresh_checkout`/`task.py daily` hooks in headless workers. A clean `review` (no `High` findings) ending with `Reviewed: <repo>` unlocks `review_gate.py` and `land.py` for either harness; any `High` finding keeps the push held until fixed and re-reviewed.
 
 ### 2. General PC -> Laptop CPU & GPU Offload (`laptop.py`)
 Usable identically from Claude Code and Antigravity when working on the PC:
@@ -41,11 +41,11 @@ Antigravity's `run_command` executes on a hidden Windows desktop (`WinSta0\exebo
 - Exposes strictly allowlisted async tools (`hw_status`, `start_release_check`, `start_real_client_smoke`, `start_hw_batch`, `job_status`, `job_cancel`) that respect shared locks, surface `VALIDATION.json` / `REAL-CLIENT.json`, and flag exit code `3` (AMD encoder hang — never retry).
 
 ### 3. Dual-Harness Guards & Landing
-One set of hook scripts serves **both** Claude Code (`settings.json`) and Antigravity (`hooks.json`):
-- `claude/hooks/pre_bash.py`: single-process `PreToolUse` dispatcher running `cargo_pool.py` (enforces `python tools/dev.py cargo -- <args>`, Gradle `--lane gradle --no-daemon`, and loopback-only `http.server`/`vite` binds to prevent Windows Defender Firewall prompts) + `review_gate.py` (holds unreviewed pushes to `main` >= 150 code lines).
-- `claude/hooks/fresh_checkout.py`: `SessionStart` fast-forward of clean `main`/`master` checkouts (or stale-branch warning).
+One set of hook scripts serves both **Claude Code** (`settings.json`) and **Antigravity** (`hooks.json`):
+- `claude/hooks/pre_bash.py`: single-process `PreToolUse` dispatcher running `cargo_pool.py` (enforces `python tools/dev.py cargo -- <args>`, Gradle `--lane gradle --no-daemon`, and loopback-only `http.server`/`vite` binds to prevent Windows Defender Firewall prompts) + `review_gate.py` (in Claude Code; Antigravity installs `--pool-only` so native `/swarm`/`/teamwork` runs without push-gate or startup-hook overhead).
+- `claude/hooks/fresh_checkout.py`: Claude Code `SessionStart` fast-forward of clean `main`/`master` checkouts (or stale-branch warning).
 - `claude/hooks/read_streak.py`: Claude Code `PostToolBatch` nudge after consecutive single-call read-only turns.
-- `claude/tools/land.py`: fetch, rebase, re-check if `main` moved, review gate (active in both Claude Code and Antigravity), push, and optional `--watch` CI.
+- `claude/tools/land.py`: fetch, rebase, re-check if `main` moved, review gate (in Claude Code), push, and optional `--watch` CI.
 
 ### 4. Zero-Garbage Hygiene (`task.py`)
 - `task.py open|add|close|sweep|daily`: per-task artifact tracking and safe teardown.

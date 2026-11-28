@@ -24,6 +24,7 @@ Holds, passes on a review, skips and errors are appended to ~/.claude/review-gat
 hook only reads the checkout; on any error it lets the push through.
 """
 import collections, hashlib, json, os, re, subprocess, sys, tempfile, time
+from urllib.parse import unquote, urlparse
 
 FIX_LINES = 150
 MAX_AGE = 24 * 3600
@@ -269,12 +270,85 @@ def push(event, least):
     return True
 
 
+REVIEWED_VERDICT = re.compile(
+    r'^Reviewed(?:\s+(?P<part>in\s+part)|\s*\(\s*(?P<high>High\s+found)\s*\))?\s*[*_`]*\s*:\s*(?P<path>.+?)\s*$',
+    re.I,
+)
+MD_FILE_LINK = re.compile(r'\[[^\]]*\]\((file://[^)]+)\)', re.I)
+HIGH_FINDING = re.compile(
+    r'^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:[*_`\[\]]*\s*)?High(?:\s*[*_`\[\]]*)?\s*(?:[;:\u2014\u2013|]|-\s)',
+    re.I,
+)
+HIGH_TABLE_ROW = re.compile(r'^\s*\|\s*(?:[*_`\[\]]*\s*)?High(?:\s*[*_`\[\]]*)?\s*\|', re.I)
+HIGH_FALSE_POS = re.compile(r'\b(?:no|zero|0)\s+high\b|high\s+means\s+a\s+crash', re.I)
+HIGH_NONE_AFTER = re.compile(
+    r'^\s*(?:[*_`]+\s*)*(?:none|0|zero|n/?a|no\s+(?:high|defects?|findings?|issues?)|clean)\b',
+    re.I,
+)
+
+
+def _clean_reviewed_path(raw):
+    text = raw.strip()
+    while text and text[0] in '*_`"\'' and text[-1] == text[0] and len(text) >= 2:
+        text = text[1:-1].strip()
+    text = text.strip('*_` ').strip()
+    link = MD_FILE_LINK.search(text)
+    uri = link.group(1) if link else (text if text.lower().startswith('file://') else None)
+    if uri:
+        parsed = urlparse(uri)
+        path = unquote(parsed.path)
+        if parsed.netloc and parsed.netloc.lower() != 'localhost':
+            if os.name == 'nt' and re.fullmatch(r'[A-Za-z]:', parsed.netloc):
+                return parsed.netloc + path
+            path = f'//{parsed.netloc}{path}'
+        elif os.name == 'nt' and re.match(r'^/[A-Za-z]:/', path):
+            path = path[1:]
+        return path
+    return text.strip('`"\' ')
+
+
+def _extract_reviewed(message):
+    """Return (repo_text, explicit_high_found) from the last Reviewed verdict line; `Reviewed in part:` returns ('', False)."""
+    last = None
+    for line in message.splitlines():
+        cand = re.sub(r'^\s*(?:[-*+]\s+)?', '', line).lstrip('*_` ').rstrip()
+        m = REVIEWED_VERDICT.match(cand)
+        if m:
+            last = m
+    if not last or last.group('part'):
+        return '', False
+    return _clean_reviewed_path(last.group('path')), bool(last.group('high'))
+
+
+def _has_high_finding(message):
+    """True when the review body reports at least one High-severity defect."""
+    for line in message.splitlines():
+        if HIGH_FALSE_POS.search(line):
+            continue
+        m = HIGH_FINDING.match(line) or HIGH_TABLE_ROW.match(line)
+        if m:
+            if HIGH_NONE_AFTER.match(line[m.end():]):
+                continue
+            return True
+    return False
+
+
 def reviewed(event):
     if event.get('agent_type') not in (None, 'reviewer', 'wave-reviewer'):
         return
-    said = re.search(r'^\s*Reviewed:\s*`?([^`\n]+?)`?\s*$', str(event.get('last_assistant_message') or ''), re.M)
-    repo = local(said.group(1).strip(), event.get('cwd') or os.getcwd()) if said else ''
+    message = str(event.get('last_assistant_message') or '')
+    raw_repo, explicit_high = _extract_reviewed(message)
+    cwd = event.get('cwd') or os.getcwd()
+    repo = local(raw_repo, cwd) if raw_repo else ''
     top = git(repo, 'rev-parse', '--show-toplevel') if os.path.isdir(repo) else None
+    if explicit_high or _has_high_finding(message):
+        target = top or git(local(cwd, '.'), 'rev-parse', '--show-toplevel')
+        if target:
+            try:
+                os.remove(note_path(target))
+            except OSError:
+                pass
+        return log(repo=target or repo or cwd, decision='review found high')
     base = base_of(top) if top else None
     if not base:  # interrupted, or a review of something that is not a checkout: it unlocks nothing
         return log(repo=repo or event.get('cwd'), decision='review not counted')

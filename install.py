@@ -6,11 +6,12 @@ Copies CLAUDE.md, native agents (`scout`, `coder`, `reviewer`), dual-harness hoo
 into ~/.claude, merges settings.json (preserving Orca hooks and marking Orca telemetry async), and
 creates ~/.claude/personal.md and machine.json from examples once.
 
-When ~/.gemini/config exists, also installs Antigravity's GEMINI.md (with personal.md inlined), merges
-a `"workflow-guards"` hook group into ~/.gemini/config/hooks.json (preserving `"orca-status"` and any
-user hook groups), and copies the shared skills into ~/.gemini/config/skills/. Retired Codex files,
-retired tools (`deepseek.py`, `oc.py`), and retired legacy agents are cleaned up. Everything replaced
-is backed up to ~/.claude/backups/claude-code-setup-<time>/ first.
+When ~/.gemini/config exists, also installs Antigravity's lean GEMINI.md (with personal.md inlined),
+merges a safety-only `"workflow-guards"` hook group (`pre_bash.py --pool-only` on `run_command`,
+removing any stale `"orca-status"` hooks while preserving custom user hook groups), and copies the
+Antigravity-relevant shared skills (`merge-train`, `public-copy`) into ~/.gemini/config/skills/.
+Retired Codex files, retired tools (`deepseek.py`, `oc.py`), and retired legacy agents are cleaned up.
+Everything replaced is backed up to ~/.claude/backups/claude-code-setup-<time>/ first.
 
 Orca's Claude profiles set CLAUDE_CONFIG_DIR and import ~/.claude/CLAUDE.md,
 so the installer ignores that variable when it points into an Orca profile.
@@ -28,6 +29,8 @@ _cfg = os.environ.get('CLAUDE_CONFIG_DIR')
 HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Path.home() / '.claude'
 GEMINI = Path.home() / '.gemini' / 'config'
 GEMINI_HOOK_GROUP = 'workflow-guards'
+GEMINI_SKILLS = ('merge-train', 'public-copy')
+GEMINI_RETIRED_SKILLS = ('issue-batch',)
 # Codex and OpenCode get no workflow: the rules and agents this setup once wrote there go (backed up).
 RETIRED_HARNESSES = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex'),
@@ -165,21 +168,16 @@ def set_hooks(config):
 
 
 def set_gemini_hooks(config):
-    """Merge this setup's Antigravity hook group into ~/.gemini/config/hooks.json, preserving all other groups (e.g. orca-status)."""
+    """Install Antigravity's safety-only PreToolUse hook (`pre_bash.py --pool-only`), removing stale `orca-status` and keeping custom user groups."""
     py = Path(sys.executable).as_posix()
-    fresh = (HOME / 'hooks' / 'fresh_checkout.py').as_posix()
-    task_daily = (HOME / 'tools' / 'task.py').as_posix()
     pre_bash = (HOME / 'hooks' / 'pre_bash.py').as_posix()
+    config.pop('orca-status', None)
     config[GEMINI_HOOK_GROUP] = {
-        'SessionStart': [
-            {'type': 'command', 'command': f'"{py}" "{fresh}"', 'timeout': 60},
-            {'type': 'command', 'command': f'"{py}" "{task_daily}" daily --antigravity', 'timeout': 5},
-        ],
         'PreToolUse': [
             {
                 'matcher': 'run_command',
                 'hooks': [
-                    {'type': 'command', 'command': f'"{py}" "{pre_bash}"', 'timeout': 20},
+                    {'type': 'command', 'command': f'"{py}" "{pre_bash}" --pool-only', 'timeout': 20},
                 ],
             }
         ],
@@ -291,7 +289,7 @@ class Installer:
             print(f'  write   {label(rules_dst)}')
             if not self.dry:
                 rules_dst.write_text(text, encoding='utf-8', newline='\n')
-        # 2. hooks.json (merge workflow-guards, preserve orca-status and all user groups)
+        # 2. hooks.json (safety-only workflow-guards, drop stale orca-status, preserve custom user groups)
         hooks_dst = GEMINI / 'hooks.json'
         cur = read_json(hooks_dst) if hooks_dst.is_file() else {}
         new = json.loads(json.dumps(cur))
@@ -301,9 +299,21 @@ class Installer:
             print(f'  merge   {label(hooks_dst)}')
             if not self.dry:
                 hooks_dst.write_text(json.dumps(new, indent=2) + '\n', encoding='utf-8', newline='\n')
-        # 3. Shared skills (preserve Orca's installed skills)
-        for src in sorted((REPO / 'skills').glob('*/SKILL.md')):
-            self.place(src, GEMINI / 'skills' / src.parent.name / 'SKILL.md', f'antigravity-skills/{src.parent.name}')
+        # 3. Lean shared skills for Antigravity (retire Orca-only issue-batch skill; preserve user skills)
+        for name in GEMINI_SKILLS:
+            src = REPO / 'skills' / name / 'SKILL.md'
+            if src.is_file():
+                self.place(src, GEMINI / 'skills' / name / 'SKILL.md', f'antigravity-skills/{name}')
+        for name in GEMINI_RETIRED_SKILLS:
+            dst = GEMINI / 'skills' / name / 'SKILL.md'
+            if dst.is_file() or dst.is_symlink():
+                self.save(dst, f'antigravity-skills/{name}')
+                print(f'  remove  {label(dst)}')
+                if not self.dry:
+                    try:
+                        dst.parent.rmdir()
+                    except OSError:
+                        pass
 
     def run(self):
         print(f'Installing into {HOME}' + (' (dry run)' if self.dry else ''))

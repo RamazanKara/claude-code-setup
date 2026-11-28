@@ -7,7 +7,7 @@ description: Fold many pending requests (issues, PRs, user lists, client request
 
 1. **Collect**: fetch, then list every source the user means: open issues and PRs of each repository (new comments on closed ones too), pasted lists, requests relayed by other sessions, finished branches not yet merged. Merge duplicates; drop what `origin/main` already does.
 2. **Triage** each with the project's `issue-triage` skill when it has one. Keep meaningful bugs and broadly useful features; drop niche or out-of-scope ones with a reason. Never cut something the user listed without telling them. Show the list: in, dropped (why), already done.
-3. **Code first**: run what is fixable through the `issue-batch` skill: one worker per item, one builder, one review, one landing. Workers write code and run only their narrow test; the full gate, the review and the hardware pass happen once, after all code is in. A late item joins the batch instead of getting its own round.
+3. **Code first**: run what is fixable in parallel (in Antigravity, use native `/swarm` or `/teamwork`; in Claude Code, use the `issue-batch` skill) with disjoint scopes, narrow per-item tests, and one integrated full gate, review, and hardware pass after all code is in. A late item joins the batch instead of getting its own round.
 4. **Release** with the project's `release-prep` skill for the host, the client or both:
    - a release-note fragment for every user-facing change (see the `public-copy` skill);
    - one review of the whole range from the previous release tag to the SHA to be tagged, with the notes; fix every finding first;

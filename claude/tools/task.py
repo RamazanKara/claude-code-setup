@@ -1131,6 +1131,10 @@ def sessions(days, apply, as_json, projects_dir=None, workspaces_root=None, gemi
 
 def daily(agy=False):
     """One line for a new session when task folders look finished, at most once a day; never an error."""
+    if os.environ.get('CLAUDE_TASK_DAILY', '1').strip() == '0':
+        if agy:
+            print('{}')
+        return
     stamp = os.environ.get('CLAUDE_TASK_STAMP') or os.path.join(HOME, 'task-daily.stamp')
     try:
         if time.time() - os.path.getmtime(stamp) < 86400:
