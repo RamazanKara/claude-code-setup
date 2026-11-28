@@ -973,51 +973,56 @@ def _newest_recursive(folder):
 
 
 def _scan_gemini_sessions(gemini_dir, gemini_days):
-    """Scan ~/.gemini/antigravity-cli/{conversations,brain} for size and stale items (>gemini_days).
+    """Scan Antigravity CLI and Desktop `{conversations,brain}` folders for size and stale items (>gemini_days).
 
-    Pairs `conversations/<cid>.db*` with `brain/<cid>/` so a live or recently updated session's
-    `brain/<cid>` is never deleted while its `.db` is open/recent or has recent nested turns.
+    Pairs `conversations/<cid>.db*` with `brain/<cid>/` per app data dir so a live or recently updated
+    session's `brain/<cid>` is never deleted while its `.db` is open/recent or has recent nested turns.
     """
-    root = gemini_dir or os.path.expanduser(os.path.join('~', '.gemini', 'antigravity-cli'))
-    if not os.path.isdir(root):
+    roots = ([gemini_dir] if gemini_dir else [
+        os.path.expanduser(os.path.join('~', '.gemini', 'antigravity-cli')),
+        os.path.expanduser(os.path.join('~', '.gemini', 'antigravity')),
+    ])
+    existing = [r for r in roots if os.path.isdir(r)]
+    if not existing:
         return {'exists': False, 'total_bytes': 0, 'stale': []}
     active_cid = (os.environ.get('ANTIGRAVITY_CONVERSATION_ID') or '').strip().lower()
     cutoff = time.time() - gemini_days * 86400.0 if gemini_days is not None else None
     total_bytes = 0
     by_cid = {}
-    for sub in ('conversations', 'brain'):
-        d = os.path.join(root, sub)
-        if not os.path.isdir(d):
-            continue
-        for entry in sorted(entries(d), key=lambda e: e.name):
-            if linked(entry.path):
+    for root in existing:
+        for sub in ('conversations', 'brain'):
+            d = os.path.join(root, sub)
+            if not os.path.isdir(d):
                 continue
-            try:
-                is_dir = entry.is_dir(follow_symlinks=False)
-                st = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            b = size_of(entry.path) if is_dir else st.st_size
-            total_bytes += b
-            if cutoff is None:
-                continue
-            cid = entry.name.split('.', 1)[0].lower()
-            bucket = by_cid.setdefault(cid, {'items': [], 'mtime': 0.0, 'locked': False})
-            mtime = _newest_recursive(entry.path) if is_dir else st.st_mtime
-            if mtime > bucket['mtime']:
-                bucket['mtime'] = mtime
-            if not is_dir and running(entry.path):
-                bucket['locked'] = True
-            bucket['items'].append({'path': entry.path, 'bytes': b})
+            for entry in sorted(entries(d), key=lambda e: e.name):
+                if linked(entry.path):
+                    continue
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                b = size_of(entry.path) if is_dir else st.st_size
+                total_bytes += b
+                if cutoff is None:
+                    continue
+                cid = entry.name.split('.', 1)[0].lower()
+                bucket = by_cid.setdefault((root, cid), {'items': [], 'mtime': 0.0, 'locked': False})
+                mtime = _newest_recursive(entry.path) if is_dir else st.st_mtime
+                if mtime > bucket['mtime']:
+                    bucket['mtime'] = mtime
+                if not is_dir and running(entry.path):
+                    bucket['locked'] = True
+                bucket['items'].append({'path': entry.path, 'bytes': b})
     stale = []
     if cutoff is not None:
-        for cid, bucket in sorted(by_cid.items()):
+        for (_root, cid), bucket in sorted(by_cid.items()):
             if active_cid and cid == active_cid:
                 continue
             if bucket['locked'] or bucket['mtime'] >= cutoff:
                 continue
             stale.extend(bucket['items'])
-    return {'exists': True, 'root': root, 'total_bytes': total_bytes, 'stale': stale}
+    return {'exists': True, 'roots': existing, 'total_bytes': total_bytes, 'stale': stale}
 
 
 def _has_memory_dir(folder):

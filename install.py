@@ -30,7 +30,7 @@ HOME = Path(_cfg) if _cfg and 'claude-profiles' not in Path(_cfg).parts else Pat
 GEMINI = Path.home() / '.gemini' / 'config'
 GEMINI_HOOK_GROUP = 'workflow-guards'
 GEMINI_SKILLS = ('merge-train', 'public-copy')
-GEMINI_RETIRED_SKILLS = ('issue-batch',)
+GEMINI_RETIRED_SKILLS = ('issue-batch', 'orca-cli', 'orca-computer-use', 'orca-per-workspace-env', 'orchestration')
 # Codex and OpenCode get no workflow: the rules and agents this setup once wrote there go (backed up).
 RETIRED_HARNESSES = {
     'codex': Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex'),

@@ -94,8 +94,9 @@ class InstallerTests(unittest.TestCase):
             home.mkdir()
             (gemini / 'skills' / 'custom-skill').mkdir(parents=True)
             (gemini / 'skills' / 'custom-skill' / 'SKILL.md').write_text('custom skill\n', encoding='utf-8')
-            (gemini / 'skills' / 'issue-batch').mkdir(parents=True)
-            (gemini / 'skills' / 'issue-batch' / 'SKILL.md').write_text('old issue-batch\n', encoding='utf-8')
+            for retired_skill in ('issue-batch', 'orchestration', 'orca-cli'):
+                (gemini / 'skills' / retired_skill).mkdir(parents=True)
+                (gemini / 'skills' / retired_skill / 'SKILL.md').write_text(f'old {retired_skill}\n', encoding='utf-8')
             (gemini / 'GEMINI.md').write_text('# Old notes\n', encoding='utf-8')
             (gemini / 'hooks.json').write_text(json.dumps({
                 'orca-status': {'Stop': [{'type': 'command', 'command': 'orca-stop.cmd', 'timeout': 10}]},
@@ -175,8 +176,9 @@ class InstallerTests(unittest.TestCase):
                 for name in ('merge-train', 'public-copy'):
                     gskill = gemini / 'skills' / name / 'SKILL.md'
                     self.assertEqual(gskill.read_bytes(), (install.REPO / 'skills' / name / 'SKILL.md').read_bytes())
-                self.assertFalse((gemini / 'skills' / 'issue-batch').exists())
-                self.assertTrue((first.backup / 'antigravity-skills' / 'issue-batch' / 'SKILL.md').exists())
+                for retired_skill in ('issue-batch', 'orchestration', 'orca-cli'):
+                    self.assertFalse((gemini / 'skills' / retired_skill).exists())
+                    self.assertTrue((first.backup / 'antigravity-skills' / retired_skill / 'SKILL.md').exists())
                 self.assertEqual((gemini / 'skills' / 'custom-skill' / 'SKILL.md').read_text(encoding='utf-8'), 'custom skill\n')
                 for gone in ('deepseek.py', 'oc.py'):
                     self.assertFalse((home / 'tools' / gone).exists())
@@ -1831,6 +1833,21 @@ class TaskToolTests(unittest.TestCase):
         self.assertTrue(nested_db.exists())  # paired with recent nested brain log!
         self.assertTrue(nested_log.exists())
         self.assertTrue(fresh_db.exists())
+        # Default (no --gemini-dir) scans BOTH ~/.gemini/antigravity-cli and ~/.gemini/antigravity (Desktop).
+        fake_home = self.root / 'fake-home'
+        for app_dir in ('antigravity-cli', 'antigravity'):
+            p_old = fake_home / '.gemini' / app_dir / 'conversations' / 'old-both.db'
+            p_old.parent.mkdir(parents=True, exist_ok=True)
+            p_old.write_text('stale\n', encoding='utf-8')
+            os.utime(p_old, (old_t, old_t))
+        both_env = {**self.env, 'USERPROFILE': str(fake_home), 'HOME': str(fake_home)}
+        both_done = subprocess.run([sys.executable, str(install.REPO / 'tools' / 'task.py'),
+                                    'sessions', '--days', '14', '--gemini-days', '3', '--apply',
+                                    '--projects-dir', str(proj), '--workspaces-root', str(ws_root)],
+                                   capture_output=True, text=True, env=both_env)
+        self.assertEqual(both_done.returncode, 0, both_done.stderr)
+        self.assertFalse((fake_home / '.gemini' / 'antigravity-cli' / 'conversations' / 'old-both.db').exists())
+        self.assertFalse((fake_home / '.gemini' / 'antigravity' / 'conversations' / 'old-both.db').exists())
 
 
 FAKE_REMOTE = """import json, os, shutil, subprocess, sys
