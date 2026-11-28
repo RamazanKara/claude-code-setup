@@ -246,6 +246,10 @@ class HwMcpTests(unittest.TestCase):
 
             srv = hw_mcp.make_http_server(disp, '127.0.0.1', 0, token)
             port = srv.server_address[1]
+            # Duplicate bind on the same loopback port must fail (SO_EXCLUSIVEADDRUSE on Windows).
+            with self.assertRaises(OSError):
+                dup = hw_mcp.make_http_server(disp, '127.0.0.1', port, token)
+                dup.server_close()
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             try:
@@ -312,6 +316,13 @@ class HwMcpTests(unittest.TestCase):
             (tmp / 'PRIORITY').write_text('release check.ps1 pid=999999\n', encoding='utf-8')
             self.assertNotIn('PRIORITY', hw_mcp.probe_locks(tmp, alive_fn=lambda _p: False))
             self.assertIn('PRIORITY', hw_mcp.probe_locks(tmp, alive_fn=lambda _p: True))
+
+            # cleanup_cancelled_locks removes only locks owned by killed dead PIDs, never unrelated locks.
+            (tmp / 'GPU-LOCK').write_text('run.py pid=12345\n', encoding='utf-8')
+            (tmp / 'RELEASE-LOCK').write_text('check.ps1 pid=77777\n', encoding='utf-8')
+            hw_mcp.cleanup_cancelled_locks(tmp, {12345}, alive_fn=lambda _p: False)
+            self.assertFalse((tmp / 'GPU-LOCK').exists())
+            self.assertTrue((tmp / 'RELEASE-LOCK').exists())
 
             cfg = tmp / 'mcp_config.json'
             cfg.write_text(json.dumps({'mcpServers': {'other': {'command': 'echo'}}}), encoding='utf-8')

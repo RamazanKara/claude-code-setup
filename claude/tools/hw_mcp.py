@@ -31,7 +31,6 @@ import os
 import re
 import secrets
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -431,16 +430,16 @@ def terminate_tree(proc: subprocess.Popen[Any], grace_seconds: float = 3.0) -> N
         return
     try:
         if os.name == 'nt':
-            try:
-                proc.send_signal(signal.CTRL_BREAK_EVENT)
-                proc.wait(timeout=grace_seconds)
-                return
-            except Exception:
-                pass
+            # Processes spawned with CREATE_NO_WINDOW have no shared console, so CTRL_BREAK_EVENT
+            # is a no-op; terminate the tree directly and let runner() clean up job-owned locks.
             subprocess.run(
                 ['taskkill', '/T', '/F', '/PID', str(proc.pid)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
             )
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         else:
             proc.terminate()
             try:
@@ -452,6 +451,32 @@ def terminate_tree(proc: subprocess.Popen[Any], grace_seconds: float = 3.0) -> N
             proc.kill()
         except Exception:
             pass
+
+
+def cleanup_cancelled_locks(work_root: Path, killed_pids: set[int], alive_fn=pid_alive) -> None:
+    """Remove workstation lock files in work_root whose recorded PID belongs to a cancelled dead process."""
+    if not killed_pids or not work_root.is_dir():
+        return
+    for name in ('RELEASE-LOCK', 'BUILD-LOCK', 'GPU-LOCK', 'PRIORITY'):
+        lock_path = work_root / name
+        if not lock_path.is_file():
+            continue
+        try:
+            text = lock_path.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        m = re.search(r'\bpid[= ](\d+)\b', text)
+        if not m:
+            continue
+        owner_pid = int(m.group(1))
+        if owner_pid not in killed_pids or alive_fn(owner_pid):
+            continue
+        for _ in range(10):
+            try:
+                lock_path.unlink(missing_ok=True)
+                break
+            except PermissionError:
+                time.sleep(0.1)
 
 
 def read_tail(path: Path, lines: int = 40) -> str:
@@ -526,15 +551,21 @@ class Job:
             self._procs.append(proc)
             return proc
 
-    def cancel(self, wait_timeout: float = 5.0) -> bool:
+    def terminate_all(self) -> set[int]:
+        with self._lock:
+            procs = list(self._procs)
+        pids: set[int] = set()
+        for p in procs:
+            pids.add(p.pid)
+            terminate_tree(p)
+        return pids
+
+    def cancel(self, wait_timeout: float = 35.0) -> bool:
         if self.done.is_set():
             return False
         self.cancel_requested.set()
-        with self._lock:
-            procs = list(self._procs)
-        for p in procs:
-            terminate_tree(p)
-        # Wait for runner()'s finally block to clean up and signal self.done.
+        self.terminate_all()
+        # Wait for runner()'s finally block (including bounded remote cleanup) to finish and signal self.done.
         self.done.wait(timeout=wait_timeout)
         return True
 
@@ -710,6 +741,9 @@ class JobManager:
             except Exception as exc:
                 err = str(exc)
             finally:
+                pids = job.terminate_all()
+                if job.cancel_requested.is_set():
+                    cleanup_cancelled_locks(self.work_root, pids)
                 job.finish(rc, err)
 
         threading.Thread(target=runner, name=job.job_id, daemon=True).start()
@@ -750,9 +784,11 @@ class JobManager:
             target = laptop_ssh_target(cfg)
             remote_script_win = rf'C:\src\butterpollo-release\hw-mcp-smoke-{job.job_id}.ps1'
             remote_json_win = rf'C:\src\butterpollo-release\hw-mcp-smoke-{job.job_id}.json'
+            remote_pid_win = rf'C:\src\butterpollo-release\hw-mcp-smoke-{job.job_id}.pid'
             remote_script_scp = remote_script_win.replace('\\', '/')
             remote_json_scp = remote_json_win.replace('\\', '/')
             local_json = job.job_dir / 'REAL-CLIENT.json'
+            remote_touched = False
             rc = 1
             err = ''
             try:
@@ -767,6 +803,7 @@ class JobManager:
                 with open(job.log_path, 'w', encoding='utf-8', errors='replace') as lf:
                     lf.write(f'[{utc_now_iso()}] copying smoke.ps1 to {target}\n')
                     lf.flush()
+                    remote_touched = True
                     mk_ps = "New-Item -ItemType Directory -Force 'C:\\src\\butterpollo-release' | Out-Null"
                     mk = job.spawn_tracked(
                         [*ssh_cmd, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', target,
@@ -786,10 +823,11 @@ class JobManager:
                     codec_arr = '@(' + ', '.join(ps_quote(c) for c in codec_list) + ')'
                     inner_ps = (
                         f"$ErrorActionPreference = 'Stop'; "
+                        f"Set-Content -LiteralPath {ps_quote(remote_pid_win)} -Value $PID -Encoding ascii; "
                         f"try {{ & {ps_quote(remote_script_win)} "
                         f"-Version {ps_quote(tag)} -Codecs {codec_arr} -Seconds {seconds} "
                         f"-Out {ps_quote(remote_json_win)}; exit $LASTEXITCODE }} "
-                        f"finally {{ Remove-Item -LiteralPath {ps_quote(remote_script_win)} -Force -ErrorAction SilentlyContinue }}"
+                        f"finally {{ Remove-Item -LiteralPath {ps_quote(remote_script_win)}, {ps_quote(remote_pid_win)} -Force -ErrorAction SilentlyContinue }}"
                     )
                     # Wrap pwsh inside PowerShell 5.1 (OpenSSH DefaultShell) so exact $LASTEXITCODE (including 3) survives.
                     outer_ps = (
@@ -824,31 +862,40 @@ class JobManager:
             except Exception as exc:
                 err = str(exc)
             finally:
-                if probe_proc is not None:
-                    terminate_tree(probe_proc)
-                # Clean remote temp files; on cancel also stop orphaned rubylight-smoke-* tasks and stale smoke LAPTOP-LOCK.
-                cleanup_ps = (
-                    f"Remove-Item -LiteralPath {ps_quote(remote_script_win)}, {ps_quote(remote_json_win)} -Force -ErrorAction SilentlyContinue; "
-                )
-                if job.cancel_requested.is_set():
+                job.terminate_all()
+                if remote_touched:
+                    # Clean only this job's remote files; on cancel stop only this job's recorded remote PID/task/lock.
+                    cleanup_ps = ''
+                    if job.cancel_requested.is_set():
+                        cleanup_ps += (
+                            f"$pf = {ps_quote(remote_pid_win)}; "
+                            "if (Test-Path -LiteralPath $pf) { "
+                            "$rpid = (Get-Content -LiteralPath $pf -Raw -ErrorAction SilentlyContinue).Trim(); "
+                            "if ($rpid -match '^\\d+$') { "
+                            "$tn = \"rubylight-smoke-$rpid\"; "
+                            "Stop-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue; "
+                            "Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue; "
+                            f"Get-CimInstance Win32_Process -Filter \"Name='pwsh.exe'\" -ErrorAction SilentlyContinue | "
+                            f"Where-Object {{ $_.CommandLine -like '*hw-mcp-smoke-{job.job_id}*' }} | "
+                            "ForEach-Object { taskkill /T /F /PID $_.ProcessId 2>$null | Out-Null }; "
+                            "taskkill /T /F /PID $rpid 2>$null | Out-Null; "
+                            "$lf = 'C:\\src\\butterpollo-release\\LAPTOP-LOCK'; "
+                            "if (Test-Path -LiteralPath $lf) { $t = Get-Content -LiteralPath $lf -Raw -ErrorAction SilentlyContinue; "
+                            "if ($t -match ('^smoke\\b.*\\bpid=' + $rpid + '\\b') -and -not (Get-Process -Id ([int]$rpid) -ErrorAction SilentlyContinue)) { "
+                            "Remove-Item -LiteralPath $lf -Force -ErrorAction SilentlyContinue } } } }; "
+                        )
                     cleanup_ps += (
-                        "Get-ScheduledTask -TaskName 'rubylight-smoke-*' -ErrorAction SilentlyContinue | ForEach-Object { "
-                        "Stop-ScheduledTask -TaskName $_.TaskName -ErrorAction SilentlyContinue; "
-                        "Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue }; "
-                        "Get-Process -Name Moonlight -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; "
-                        "$lf = 'C:\\src\\butterpollo-release\\LAPTOP-LOCK'; "
-                        "if (Test-Path -LiteralPath $lf) { $t = Get-Content -LiteralPath $lf -Raw -ErrorAction SilentlyContinue; "
-                        "if ($t -match '^smoke\\b.*pid=(\\d+)' -and -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) { "
-                        "Remove-Item -LiteralPath $lf -Force -ErrorAction SilentlyContinue } }"
+                        f"Remove-Item -LiteralPath {ps_quote(remote_script_win)}, {ps_quote(remote_json_win)}, {ps_quote(remote_pid_win)} "
+                        "-Force -ErrorAction SilentlyContinue"
                     )
-                try:
-                    subprocess.run(
-                        [*ssh_cmd, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', target,
-                         'powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', ps_encoded_command(cleanup_ps)],
-                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25,
-                    )
-                except Exception:
-                    pass
+                    try:
+                        subprocess.run(
+                            [*ssh_cmd, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', target,
+                             'powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', ps_encoded_command(cleanup_ps)],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25,
+                        )
+                    except Exception:
+                        pass
                 job.finish(rc, err)
 
         threading.Thread(target=runner, name=job.job_id, daemon=True).start()
@@ -896,6 +943,9 @@ class JobManager:
             except Exception as exc:
                 err = str(exc)
             finally:
+                pids = job.terminate_all()
+                if job.cancel_requested.is_set():
+                    cleanup_cancelled_locks(self.work_root, pids)
                 job.finish(rc, err)
 
         threading.Thread(target=runner, name=job.job_id, daemon=True).start()
@@ -1155,7 +1205,16 @@ def run_stdio(dispatcher: McpDispatcher, stdin=None, stdout=None) -> None:
             out.flush()
 
 
-class _IPv6ThreadingHTTPServer(http.server.ThreadingHTTPServer):
+class _ExclusiveThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if os.name == 'nt' and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+class _IPv6ThreadingHTTPServer(_ExclusiveThreadingHTTPServer):
     address_family = socket.AF_INET6
 
 
@@ -1298,7 +1357,7 @@ def make_http_server(
                 return
             self._send_json(200, resp, extra_headers=extra)
 
-    server_cls = _IPv6ThreadingHTTPServer if ':' in host else http.server.ThreadingHTTPServer
+    server_cls = _IPv6ThreadingHTTPServer if ':' in host else _ExclusiveThreadingHTTPServer
     server = server_cls((host, port), Handler)
     server.daemon_threads = True
     return server
