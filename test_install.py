@@ -230,6 +230,30 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((home / 'tools' / 'worker.py').exists())
             self.assertTrue((home / 'tools' / 'laptop.py').exists())
 
+    def test_retiring_antigravity_skill_junction_or_symlink_preserves_target(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            home, gemini = root / 'claude', root / 'gemini' / 'config'
+            home.mkdir()
+            (gemini / 'skills').mkdir(parents=True)
+            target = root / 'external-orca-cli'
+            target.mkdir()
+            (target / 'SKILL.md').write_text('external skill\n', encoding='utf-8')
+            link = gemini / 'skills' / 'orca-cli'
+            if os.name == 'nt':
+                subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(target)], check=True, capture_output=True)
+            else:
+                link.symlink_to(target, target_is_directory=True)
+            with patch.multiple(install, HOME=home, GEMINI=gemini, RETIRED_AGENTS={}, RETIRED_HARNESSES={}):
+                install.Installer(True).run()
+                self.assertTrue(link.is_symlink() or install._is_junction(link))
+                install.Installer(False).run()
+                self.assertFalse(link.exists() or link.is_symlink() or install._is_junction(link))
+                self.assertEqual((target / 'SKILL.md').read_text(encoding='utf-8'), 'external skill\n')
+                second = install.Installer(False)
+                second.run()
+                self.assertFalse(second.saved)
+
 
 class ReadStreakHookTests(unittest.TestCase):
     def setUp(self):

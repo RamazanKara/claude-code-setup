@@ -19,7 +19,7 @@ so the installer ignores that variable when it points into an Orca profile.
   python install.py            # install, or update after `git pull` or editing personal.md
   python install.py --dry-run  # show what would change
 """
-import argparse, datetime, filecmp, hashlib, json, os, re, shutil, sys
+import argparse, datetime, filecmp, hashlib, json, os, re, shutil, stat, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -211,6 +211,17 @@ def antigravity_rules(personal):
     return text
 
 
+def _is_junction(path):
+    fn = getattr(os.path, 'isjunction', None)
+    if fn is not None:
+        return fn(path)
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return bool(getattr(st, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)) and not path.is_symlink()
+
+
 class Installer:
     def __init__(self, dry):
         self.dry, self.saved = dry, False
@@ -305,8 +316,24 @@ class Installer:
             if src.is_file():
                 self.place(src, GEMINI / 'skills' / name / 'SKILL.md', f'antigravity-skills/{name}')
         for name in GEMINI_RETIRED_SKILLS:
-            dst = GEMINI / 'skills' / name / 'SKILL.md'
-            if dst.is_file() or dst.is_symlink():
+            skill_dir = GEMINI / 'skills' / name
+            if skill_dir.is_symlink() or _is_junction(skill_dir):
+                print(f'  remove  {label(skill_dir)}')
+                if not self.dry:
+                    if skill_dir.is_symlink():
+                        try:
+                            skill_dir.unlink()
+                        except OSError:
+                            skill_dir.rmdir()
+                    else:
+                        skill_dir.rmdir()
+                continue
+            dst = skill_dir / 'SKILL.md'
+            try:
+                exists = dst.is_file() or dst.is_symlink()
+            except OSError:
+                exists = False
+            if exists:
                 self.save(dst, f'antigravity-skills/{name}')
                 print(f'  remove  {label(dst)}')
                 if not self.dry:
